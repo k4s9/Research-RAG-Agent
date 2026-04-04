@@ -63,7 +63,7 @@ class Chunk(Base):
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
     content_type = Column(String(20), nullable=False)  # text/table/formula/image_ref
-    metadata = Column(JSON, nullable=True)
+    chunk_metadata = Column(JSON, nullable=True)
     version_status = Column(String(20), nullable=False, default='active')  # active/outdated
     superseded_by = Column(String(36), ForeignKey('chunk.id'), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -71,7 +71,6 @@ class Chunk(Base):
     # 关系
     document = relationship('Document', back_populates='chunks')
     superseded = relationship('Chunk', remote_side=[id], backref='supersedes')
-    version_logs = relationship('VersionLog', back_populates='entity', foreign_keys='VersionLog.entity_id')
 
 class Conversation(Base):
     __tablename__ = 'conversation'
@@ -103,7 +102,6 @@ class Memory(Base):
     source_chunk = relationship('Chunk')
     projects = relationship('Project', secondary=project_memory, back_populates='memories')
     superseded = relationship('Memory', remote_side=[id], backref='supersedes')
-    version_logs = relationship('VersionLog', back_populates='entity', foreign_keys='VersionLog.entity_id')
 
 class VersionLog(Base):
     __tablename__ = 'version_log'

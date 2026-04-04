@@ -1,0 +1,56 @@
+# Environment variables (sensitive)
+.env
+.env.local
+.env.*.local
+
+# Data directories
+data/
+volumes/
+
+# Log files
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE configurations
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Trae AI workspace
+.trae/
+
+# Research RAG Agent specific
+*.tmp
+*.bak
+*.backup
+temp/
+tmp/
+
+# Milvus volumes
+milvus/

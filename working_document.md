@@ -58,8 +58,8 @@
 | **前端框架** | Gradio | Streamlit | 原生支持文件上传 + 对话界面、Python 原生、部署简单 |
 | **向量数据库** | Milvus Standalone (Docker) | Qdrant | 原生支持 dense + sparse 混合检索，与 BGE-M3 生态集成紧密 |
 | **关系数据库** | PostgreSQL | SQLite | 支持 JSON 字段、全文检索、事务可靠，生产就绪 |
-| **Embedding** | BAAI/bge-m3 (本地部署) | text-embedding-3-small (OpenAI) | 同时支持 dense/sparse/multi-vector 三种检索，中英文优秀 |
-| **Reranker** | BAAI/bge-reranker-v2-m3 (本地) | bge-reranker-v2-minicpm-layerwise | 轻量高效，多语言支持好，636MB 即可部署 |
+| **Embedding** | Qwen/Qwen3-Embedding-0.6B (本地部署) | BAAI/bge-m3 | 轻量级，性能优异，适合 Ascend 推理卡部署 |
+| **Reranker** | Qwen/Qwen3-Reranker-0.6B (本地) | BAAI/bge-reranker-v2-m3 | 轻量级，性能优异，适合 Ascend 推理卡部署 |
 | **LLM API** | DeepSeek Chat API | OpenAI GPT-4o | 性价比高、中文能力强、推理质量优秀 |
 | **OCR** | PaddleOCR + PP-StructureV3 | — | 表格提取准确率达 93%+，支持公式→LaTeX，本地部署隐私可控 |
 | **PDF 解析** | PyMuPDF (fitz) + PaddleOCR | pdfplumber | 原生 PDF 文本提取快，扫描件降级到 OCR |
