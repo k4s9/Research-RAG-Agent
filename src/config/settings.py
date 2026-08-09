@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
@@ -33,10 +34,12 @@ class Settings(BaseSettings):
     # Paths
     upload_dir: str = "./data/uploads"
     image_dir: str = "./data/images"
+    max_upload_size_bytes: int = 50 * 1024 * 1024
 
     # Server
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     gradio_port: int = 7860
+
 
 settings = Settings()

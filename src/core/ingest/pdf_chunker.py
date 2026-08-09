@@ -10,9 +10,8 @@ class PDFChunker(BaseChunker):
         self.min_chunk_size = min_chunk_size
 
     def chunk(self, cleaned_content: Dict[str, Any]) -> List[ChunkResult]:
-        if cleaned_content.get("file_type") == "markdown":
-            logger.warning("PDFChunker 收到了 Markdown 内容，应使用 MarkdownChunker")
-            return self._fallback_chunk(cleaned_content)
+        if cleaned_content.get("file_type") != "pdf":
+            raise ValueError("PDFChunker 只接受 file_type=pdf 的内容")
 
         pages = cleaned_content.get("pages", [])
         chunks = []
@@ -88,6 +87,8 @@ class PDFChunker(BaseChunker):
                 content_type="text",
                 metadata={
                     "page_num": page_num,
+                    "page_start": page_num,
+                    "page_end": page_num,
                     "is_scanned": True,
                     "chunk_type": "scanned_split"
                 }
@@ -112,6 +113,8 @@ class PDFChunker(BaseChunker):
                         content_type="text",
                         metadata={
                             "page_num": page_num,
+                            "page_start": page_num,
+                            "page_end": page_num,
                             "chunk_type": "paragraph_split"
                         }
                     ))
@@ -126,6 +129,8 @@ class PDFChunker(BaseChunker):
                             content_type="text",
                             metadata={
                                 "page_num": page_num,
+                                "page_start": page_num,
+                                "page_end": page_num,
                                 "chunk_type": "word_split"
                             }
                         ))
@@ -140,6 +145,8 @@ class PDFChunker(BaseChunker):
                 content_type="text",
                 metadata={
                     "page_num": page_num,
+                    "page_start": page_num,
+                    "page_end": page_num,
                     "chunk_type": "paragraph_split"
                 }
             ))
@@ -161,6 +168,8 @@ class PDFChunker(BaseChunker):
             content_type="text",
             metadata={
                 "page_num": page_num,
+                "page_start": page_num,
+                "page_end": page_num,
                 "paragraph_count": len(paragraphs),
                 "word_count": word_count,
                 "chunk_type": "paragraph_merge"
@@ -175,7 +184,11 @@ class PDFChunker(BaseChunker):
         previous_content = ""
 
         for i, chunk in enumerate(chunks):
-            if previous_content and i > 0:
+            same_page = (
+                i > 0
+                and chunks[i - 1].metadata.get("page_num") == chunk.metadata.get("page_num")
+            )
+            if previous_content and same_page:
                 words = previous_content.split()
                 overlap_words = words[-min(self.overlap, len(words)):] if words else []
                 overlap_text = ' '.join(overlap_words)

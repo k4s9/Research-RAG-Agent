@@ -6,12 +6,21 @@ from src.core.ingest.base import BaseParser
 
 
 class MarkdownSection:
-    def __init__(self, level: int, heading: str, content: str, start_line: int, end_line: int):
+    def __init__(
+        self,
+        level: int,
+        heading: str,
+        content: str,
+        start_line: int,
+        end_line: int,
+        section_path: Optional[List[str]] = None,
+    ):
         self.level = level
         self.heading = heading.strip()
         self.content = content.strip()
         self.start_line = start_line
         self.end_line = end_line
+        self.section_path = section_path or ([self.heading] if self.heading else [])
         self.subsections: List[MarkdownSection] = []
 
     @property
@@ -37,7 +46,7 @@ class MarkdownBlock:
 
 
 class EnhancedMarkdownParser(BaseParser):
-    def __init__(self, min_heading_level: int = 2, max_heading_level: int = 6):
+    def __init__(self, min_heading_level: int = 1, max_heading_level: int = 6):
         self.min_heading_level = min_heading_level
         self.max_heading_level = max_heading_level
         self._code_block_pattern = re.compile(r'^```(\w*)\s*$')
@@ -80,52 +89,58 @@ class EnhancedMarkdownParser(BaseParser):
             raise
 
     def _split_into_sections(self, lines: List[str]) -> List[MarkdownSection]:
-        sections = []
-        current_section = None
-        current_content_lines = []
-        section_start_line = 0
+        sections: List[MarkdownSection] = []
+        heading_stack: List[Tuple[int, str]] = []
+        current_section: Optional[MarkdownSection] = None
+        current_content_lines: List[str] = []
 
-        for i, line in enumerate(lines):
+        def finish_section(end_line: int) -> None:
+            nonlocal current_section, current_content_lines
+            if current_section is None:
+                return
+            current_section.content = "\n".join(current_content_lines).strip()
+            current_section.end_line = max(current_section.start_line, end_line)
+            if current_section.content or current_section.heading:
+                sections.append(current_section)
+            current_section = None
+            current_content_lines = []
+
+        for index, line in enumerate(lines):
+            line_number = index + 1
             heading_match = self._heading_pattern.match(line)
-
-            if heading_match:
-                if current_section is not None:
-                    current_section.content = '\n'.join(current_content_lines)
-                    sections.append(current_section)
-
-                level = len(heading_match.group(1))
-                heading = heading_match.group(2)
-
-                if level >= self.min_heading_level:
+            if not heading_match:
+                if current_section is None:
                     current_section = MarkdownSection(
-                        level=level,
-                        heading=heading,
+                        level=0,
+                        heading="Document Root",
                         content="",
-                        start_line=i + 1,
-                        end_line=i + 1
+                        start_line=1,
+                        end_line=line_number,
+                        section_path=[],
                     )
-                    current_content_lines = []
-                    section_start_line = i + 1
-
                 current_content_lines.append(line)
-            else:
+                continue
+
+            level = len(heading_match.group(1))
+            if level < self.min_heading_level or level > self.max_heading_level:
                 if current_section is not None:
                     current_content_lines.append(line)
+                continue
 
-        if current_section is not None:
-            current_section.content = '\n'.join(current_content_lines)
-            current_section.end_line = len(lines)
-            sections.append(current_section)
+            finish_section(line_number - 1)
+            heading = heading_match.group(2).strip()
+            heading_stack = [item for item in heading_stack if item[0] < level]
+            heading_stack.append((level, heading))
+            current_section = MarkdownSection(
+                level=level,
+                heading=heading,
+                content="",
+                start_line=line_number,
+                end_line=line_number,
+                section_path=[item[1] for item in heading_stack],
+            )
 
-        if not sections and lines:
-            sections.append(MarkdownSection(
-                level=0,
-                heading="Document Root",
-                content='\n'.join(lines),
-                start_line=1,
-                end_line=len(lines)
-            ))
-
+        finish_section(len(lines))
         return sections
 
     def _extract_blocks(self, lines: List[str]) -> List[MarkdownBlock]:
@@ -256,6 +271,7 @@ class EnhancedMarkdownParser(BaseParser):
             "content": section.content,
             "start_line": section.start_line,
             "end_line": section.end_line,
+            "section_path": section.section_path,
             "word_count": section.word_count,
             "char_count": section.char_count
         }

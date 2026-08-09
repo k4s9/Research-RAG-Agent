@@ -73,6 +73,7 @@ class MarkdownChunker(BaseChunker):
                     "section_index": section_index,
                     "heading": heading,
                     "heading_level": level,
+                    "section_path": section.get("section_path", [heading] if heading else []),
                     "section_start_line": section.get("start_line", 0),
                     "section_end_line": section.get("end_line", 0),
                     "chunk_type": "section",
@@ -80,12 +81,21 @@ class MarkdownChunker(BaseChunker):
                 }
             ))
         else:
-            section_chunks = self._split_large_section(content, heading, level, section_index)
+            section_chunks = self._split_large_section(
+                content, heading, level, section_index, section
+            )
             chunks.extend(section_chunks)
 
         return chunks
 
-    def _split_large_section(self, content: str, heading: str, level: int, section_index: int) -> List[ChunkResult]:
+    def _split_large_section(
+        self,
+        content: str,
+        heading: str,
+        level: int,
+        section_index: int,
+        section: Dict[str, Any],
+    ) -> List[ChunkResult]:
         chunks = []
         paragraphs = self._split_into_paragraphs(content)
 
@@ -102,15 +112,21 @@ class MarkdownChunker(BaseChunker):
             if para_len > self.chunk_size:
                 if current_chunk_paragraphs:
                     chunk_text = '\n\n'.join(current_chunk_paragraphs)
-                    chunks.append(self._create_section_chunk(chunk_text, heading, level, section_index))
+                    chunks.append(self._create_section_chunk(
+                        chunk_text, heading, level, section_index, section=section
+                    ))
                     current_chunk_paragraphs = []
                     current_word_count = 0
 
-                chunks.extend(self._split_paragraph_into_chunks(para, heading, level, section_index))
+                chunks.extend(self._split_paragraph_into_chunks(
+                    para, heading, level, section_index, section
+                ))
 
             elif current_word_count + para_len > self.chunk_size:
                 chunk_text = '\n\n'.join(current_chunk_paragraphs)
-                chunks.append(self._create_section_chunk(chunk_text, heading, level, section_index))
+                chunks.append(self._create_section_chunk(
+                    chunk_text, heading, level, section_index, section=section
+                ))
 
                 current_chunk_paragraphs = [para]
                 current_word_count = para_len
@@ -120,11 +136,20 @@ class MarkdownChunker(BaseChunker):
 
         if current_chunk_paragraphs:
             chunk_text = '\n\n'.join(current_chunk_paragraphs)
-            chunks.append(self._create_section_chunk(chunk_text, heading, level, section_index))
+            chunks.append(self._create_section_chunk(
+                chunk_text, heading, level, section_index, section=section
+            ))
 
         return chunks
 
-    def _split_paragraph_into_chunks(self, para: str, heading: str, level: int, section_index: int) -> List[ChunkResult]:
+    def _split_paragraph_into_chunks(
+        self,
+        para: str,
+        heading: str,
+        level: int,
+        section_index: int,
+        section: Dict[str, Any],
+    ) -> List[ChunkResult]:
         chunks = []
         words = para.split()
         sentences = self._split_into_sentences(para)
@@ -139,7 +164,9 @@ class MarkdownChunker(BaseChunker):
                 if current_word_count + sentence_words > self.chunk_size:
                     if current_sentences:
                         chunk_text = ' '.join(current_sentences)
-                        chunks.append(self._create_section_chunk(chunk_text, heading, level, section_index, is_split=True))
+                        chunks.append(self._create_section_chunk(
+                            chunk_text, heading, level, section_index, True, section
+                        ))
                         current_sentences = []
                         current_word_count = 0
 
@@ -148,12 +175,16 @@ class MarkdownChunker(BaseChunker):
 
             if current_sentences:
                 chunk_text = ' '.join(current_sentences)
-                chunks.append(self._create_section_chunk(chunk_text, heading, level, section_index, is_split=True))
+                chunks.append(self._create_section_chunk(
+                    chunk_text, heading, level, section_index, True, section
+                ))
         else:
             for i in range(0, len(words), self.chunk_size):
                 chunk_words = words[i:i + self.chunk_size]
                 chunk_text = ' '.join(chunk_words)
-                chunks.append(self._create_section_chunk(chunk_text, heading, level, section_index, is_split=True))
+                chunks.append(self._create_section_chunk(
+                    chunk_text, heading, level, section_index, True, section
+                ))
 
         return chunks
 
@@ -162,7 +193,16 @@ class MarkdownChunker(BaseChunker):
         sentences = re.split(sentence_pattern, text)
         return [s.strip() for s in sentences if s.strip()]
 
-    def _create_section_chunk(self, content: str, heading: str, level: int, section_index: int, is_split: bool = False) -> ChunkResult:
+    def _create_section_chunk(
+        self,
+        content: str,
+        heading: str,
+        level: int,
+        section_index: int,
+        is_split: bool = False,
+        section: Optional[Dict[str, Any]] = None,
+    ) -> ChunkResult:
+        section = section or {}
         prefix = ""
         if self.preserve_headings and heading:
             prefix = "#" * level + " " + heading + "\n\n"
@@ -176,6 +216,9 @@ class MarkdownChunker(BaseChunker):
                 "section_index": section_index,
                 "heading": heading,
                 "heading_level": level,
+                "section_path": section.get("section_path", [heading] if heading else []),
+                "section_start_line": section.get("start_line", 0),
+                "section_end_line": section.get("end_line", 0),
                 "chunk_type": "section_split" if is_split else "section",
                 "is_split": is_split,
                 "word_count": len(chunk_content.split())
@@ -350,7 +393,12 @@ class MarkdownChunker(BaseChunker):
         for chunk in chunks:
             word_count = len(chunk.content.split())
 
-            if word_count < self.min_chunk_size and len(quality_chunks) > 0:
+            same_section = (
+                quality_chunks
+                and quality_chunks[-1].metadata.get("section_path")
+                == chunk.metadata.get("section_path")
+            )
+            if word_count < self.min_chunk_size and same_section:
                 previous_chunk = quality_chunks[-1]
                 combined_content = previous_chunk.content + "\n\n" + chunk.content
                 combined_word_count = len(combined_content.split())

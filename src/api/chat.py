@@ -5,32 +5,35 @@ from loguru import logger
 
 router = APIRouter()
 
+
 @router.post("/message", response_model=ChatMessageResponse)
 async def send_message(request: ChatMessageRequest):
     """发送对话消息"""
     try:
         # 初始化 Agent 编排器
         orchestrator = AgentOrchestrator()
-        
+
         # 处理消息
         result = await orchestrator.handle_message(
             message=request.message,
             project_ids=request.project_ids,
             session_id=request.session_id,
-            history=None  # 暂时不处理历史对话
+            history=None,  # 暂时不处理历史对话
         )
-        
+
         # 构建响应
         response = ChatMessageResponse(
             session_id=result["session_id"],
             response=result["response"],
             extracted_memories=result["extracted_memories"],
-            retrieved_context=result["retrieved_context"]
+            retrieved_context=result["retrieved_context"],
+            citations=result.get("citations", []),
+            invalid_citation_ids=result.get("invalid_citation_ids", []),
         )
-        
+
         logger.info(f"聊天消息处理完成: session_id={request.session_id}")
         return response
-        
+
     except Exception as e:
         logger.error(f"聊天消息处理失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"聊天消息处理失败: {str(e)}")
@@ -47,12 +50,12 @@ async def get_chat_session(session_id: str):
             {
                 "role": "user",
                 "content": "导师今天说我们的注意力机制方案需要改为用 Flash Attention，之前的标准实现效率太低了",
-                "timestamp": "2026-03-30T10:00:00Z"
+                "timestamp": "2026-03-30T10:00:00Z",
             },
             {
                 "role": "assistant",
                 "content": "我已记录导师的意见。我注意到您之前在3月15日的讨论中提到过使用标准Multi-Head Attention的方案，该条记录已标记为过时。关于Flash Attention的集成，建议您可以参考...",
-                "timestamp": "2026-03-30T10:01:00Z"
-            }
-        ]
+                "timestamp": "2026-03-30T10:01:00Z",
+            },
+        ],
     )

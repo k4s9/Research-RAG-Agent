@@ -1,5 +1,6 @@
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import Any, List
+
 
 class SearchRequest(BaseModel):
     query: str
@@ -10,16 +11,21 @@ class SearchRequest(BaseModel):
     top_k: int
     time_decay_enabled: bool
 
+
 class SearchResultItem(BaseModel):
     id: str
     entity_type: str
     content: str
     content_type: str
     version_status: str
-    source: str
+    filename: str = ""
+    locator: dict[str, Any] = Field(default_factory=dict)
+    source: str = ""
     score: float
     project_ids: List[str]
-    created_at: str
+    created_at: str = ""
+    retrieval: dict[str, Any] = Field(default_factory=dict)
+
 
 class SearchResponse(BaseModel):
     results: List[SearchResultItem]

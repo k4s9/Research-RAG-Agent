@@ -3,6 +3,16 @@ from src.config.settings import settings
 from loguru import logger
 
 COLLECTION_NAME = "knowledge_chunks"
+REQUIRED_FIELDS = {
+    "id",
+    "entity_type",
+    "dense_vector",
+    "project_ids",
+    "version_status",
+    "content_type",
+    "content",
+    "created_at",
+}
 
 
 class MilvusClientWrapper:
@@ -16,6 +26,12 @@ class MilvusClientWrapper:
         try:
             logger.info(f"检查 Milvus 集合是否存在: {self.collection_name}")
             if self.client.has_collection(collection_name=self.collection_name):
+                description = self.client.describe_collection(collection_name=self.collection_name)
+                actual_fields = {field["name"] for field in description.get("fields", [])}
+                missing_fields = REQUIRED_FIELDS - actual_fields
+                if missing_fields:
+                    missing = ", ".join(sorted(missing_fields))
+                    raise RuntimeError(f"Milvus collection schema 缺少字段: {missing}")
                 logger.info(f"Milvus 集合已存在，直接使用: {self.collection_name}")
                 return
 
@@ -34,12 +50,8 @@ class MilvusClientWrapper:
                 max_length=36,
                 is_primary=True,
             )
-            schema.add_field(
-                field_name="entity_type", datatype=DataType.VARCHAR, max_length=16
-            )
-            schema.add_field(
-                field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=1024
-            )
+            schema.add_field(field_name="entity_type", datatype=DataType.VARCHAR, max_length=16)
+            schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=1024)
             schema.add_field(
                 field_name="project_ids",
                 datatype=DataType.ARRAY,
@@ -47,12 +59,8 @@ class MilvusClientWrapper:
                 max_length=36,
                 max_capacity=100,
             )
-            schema.add_field(
-                field_name="version_status", datatype=DataType.VARCHAR, max_length=16
-            )
-            schema.add_field(
-                field_name="content_type", datatype=DataType.VARCHAR, max_length=16
-            )
+            schema.add_field(field_name="version_status", datatype=DataType.VARCHAR, max_length=16)
+            schema.add_field(field_name="content_type", datatype=DataType.VARCHAR, max_length=16)
             schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=65535)
             schema.add_field(field_name="created_at", datatype=DataType.INT64)
 
@@ -81,19 +89,45 @@ class MilvusClientWrapper:
             import traceback
 
             logger.error(traceback.format_exc())
+            raise
+
+    def ensure_collection(self) -> None:
+        self._ensure_collection_exists()
+
+    def recreate_collection(self) -> None:
+        """Explicitly recreate the collection for local development/migrations."""
+        if self.client.has_collection(collection_name=self.collection_name):
+            self.client.drop_collection(collection_name=self.collection_name)
+        self._ensure_collection_exists()
 
     def insert(self, entities: list):
         """插入向量数据"""
         try:
-            result = self.client.insert(
-                collection_name=self.collection_name, data=entities
-            )
+            result = self.client.insert(collection_name=self.collection_name, data=entities)
             insert_count = result.get("insert_count", 0)
+            if insert_count != len(entities):
+                raise RuntimeError(
+                    f"Milvus 插入数量不一致: expected={len(entities)}, actual={insert_count}"
+                )
             logger.info(f"成功插入 {insert_count} 条数据到 Milvus")
             return result
         except Exception as e:
             logger.error(f"插入 Milvus 失败: {str(e)}")
-            return {}
+            raise
+
+    def delete(self, ids: list[str]):
+        """Delete vectors during a compensating cleanup operation."""
+        if not ids:
+            return
+        try:
+            quoted_ids = ", ".join(f"'{chunk_id}'" for chunk_id in ids)
+            self.client.delete(
+                collection_name=self.collection_name,
+                filter=f"id in [{quoted_ids}]",
+            )
+        except Exception as e:
+            logger.error(f"删除 Milvus 向量失败: {str(e)}")
+            raise
 
     def search(self, vector: list, top_k: int = 10, filter: str = None):
         """搜索相似向量"""
@@ -136,24 +170,21 @@ class MilvusClientWrapper:
             logger.error(f"删除 Milvus 集合失败: {str(e)}")
 
 
-try:
-    milvus_client = MilvusClientWrapper()
-except Exception as e:
-    logger.error(f"创建 Milvus 客户端失败: {str(e)}")
+class LazyMilvusClient:
+    """Create the network client only when a Milvus operation is requested."""
 
-    class DummyMilvusClient:
-        def insert(self, entities):
-            logger.warning("Milvus 连接失败，跳过向量数据插入")
-            return {}
+    collection_name = COLLECTION_NAME
 
-        def search(self, vector, top_k=10, filter=None):
-            logger.warning("Milvus 连接失败，返回空搜索结果")
-            return []
+    def __init__(self) -> None:
+        self._client: MilvusClientWrapper | None = None
 
-        def has_collection(self, collection_name):
-            return False
+    def _get(self) -> MilvusClientWrapper:
+        if self._client is None:
+            self._client = MilvusClientWrapper()
+        return self._client
 
-        def drop_collection(self, collection_name):
-            pass
+    def __getattr__(self, name: str):
+        return getattr(self._get(), name)
 
-    milvus_client = DummyMilvusClient()
+
+milvus_client = LazyMilvusClient()

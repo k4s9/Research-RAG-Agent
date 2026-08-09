@@ -52,6 +52,7 @@ class PDFParser:
 
             logger.info(f"PDF 解析完成: {file_path}, 共 {len(pages)} 页")
             return {
+                "file_type": "pdf",
                 "pages": pages,
                 "total_pages": len(pages)
             }

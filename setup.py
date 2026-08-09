@@ -19,15 +19,9 @@ setup(
         "loguru>=0.7.2",
         "aiofiles>=23.2.1",
         "python-dotenv>=1.0.1",
-        "uvicorn>=0.28.0"
+        "uvicorn>=0.28.0",
+        "alembic>=1.13.0",
     ],
-    extras_require={
-        "dev": [
-            "pytest",
-            "pytest-asyncio",
-            "ruff",
-            "pre-commit"
-        ]
-    },
-    python_requires=">=3.10"
+    extras_require={"dev": ["pytest", "pytest-asyncio", "ruff", "pre-commit"]},
+    python_requires=">=3.10",
 )

@@ -47,6 +47,7 @@ class Document(Base):
     filename = Column(String(255), nullable=False)
     file_type = Column(String(10), nullable=False)  # pdf/pptx/md
     file_path = Column(String(512), nullable=False)
+    content_hash = Column(String(64), nullable=True, unique=True, index=True)
     status = Column(String(20), nullable=False)  # processing/ready/failed
     parse_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

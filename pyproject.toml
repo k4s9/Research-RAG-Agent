@@ -14,6 +14,11 @@ quote-style = "double"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "unit: tests with no external service dependencies",
+    "integration: tests requiring local backing services",
+    "e2e: tests requiring the complete application stack",
+]
 
 [build-system]
 requires = ["setuptools", "wheel"]
@@ -24,5 +29,6 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
-    "pre-commit"
+    "pre-commit",
+    "alembic>=1.13.0"
 ]
