@@ -1,0 +1,2 @@
+{"id":"sample-1","query":"verified calibration","gold_ids":["c1"],"documents":[{"id":"c1","content":"The protocol uses verified calibration before each run."},{"id":"c2","content":"Timing is recorded after the experiment."}]}
+{"id":"sample-2","query":"reproducible timing","gold_ids":["c2"],"documents":[{"id":"c1","content":"The protocol uses verified calibration before each run."},{"id":"c2","content":"The beta protocol records reproducible timing."}]}

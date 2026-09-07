@@ -1,8 +1,8 @@
-import uuid
 import hashlib
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import delete, select
@@ -16,7 +16,6 @@ from src.core.retrieval.embedder import Qwen3Embedder
 from src.db.models import Chunk, Document, Project
 from src.db.postgres import get_db as get_db_session
 
-
 SUPPORTED_FILE_TYPES = {".pdf": "pdf", ".md": "markdown", ".markdown": "markdown"}
 
 
@@ -28,10 +27,10 @@ class DocumentIngestPipeline:
         chunk_size: int = 384,
         overlap: int = 128,
         *,
-        pdf_parser: Optional[PDFParser] = None,
-        markdown_parser: Optional[EnhancedMarkdownParser] = None,
-        cleaner: Optional[DocumentCleaner] = None,
-        embedder: Optional[Qwen3Embedder] = None,
+        pdf_parser: PDFParser | None = None,
+        markdown_parser: EnhancedMarkdownParser | None = None,
+        cleaner: DocumentCleaner | None = None,
+        embedder: Qwen3Embedder | None = None,
         vector_store: Any = None,
         db_session_factory: Any = None,
     ):
@@ -64,8 +63,8 @@ class DocumentIngestPipeline:
         file_path: str,
         file_type: str,
         content_hash: str,
-        project_ids: List[str],
-    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        project_ids: list[str],
+    ) -> tuple[str, dict[str, Any] | None]:
         async for session in self.db_session_factory():
             projects = []
             for project_id in project_ids:
@@ -74,7 +73,7 @@ class DocumentIngestPipeline:
                     raise ValueError(f"项目不存在: {project_id}")
                 projects.append(project)
             result = await session.execute(
-                select(Document).where(Document.content_hash == content_hash)
+                select(Document).where(Document.content_hash == content_hash),
             )
             existing = (
                 result.scalar_one_or_none() if hasattr(result, "scalar_one_or_none") else None
@@ -111,7 +110,7 @@ class DocumentIngestPipeline:
                     projects=projects,
                     created_at=now,
                     updated_at=now,
-                )
+                ),
             )
             await session.commit()
             break
@@ -126,7 +125,11 @@ class DocumentIngestPipeline:
         return digest.hexdigest()
 
     async def _set_status(
-        self, document_id: str, status: str, stage: str, error: Optional[str] = None
+        self,
+        document_id: str,
+        status: str,
+        stage: str,
+        error: str | None = None,
     ) -> None:
         async for session in self.db_session_factory():
             document = await session.get(Document, document_id)
@@ -145,7 +148,10 @@ class DocumentIngestPipeline:
             break
 
     async def _persist_chunks(
-        self, document_id: str, chunks: List[Dict[str, Any]], parse_metadata: Dict[str, Any]
+        self,
+        document_id: str,
+        chunks: list[dict[str, Any]],
+        parse_metadata: dict[str, Any],
     ) -> None:
         async for session in self.db_session_factory():
             document = await session.get(Document, document_id)
@@ -166,7 +172,7 @@ class DocumentIngestPipeline:
                         created_at=now,
                     )
                     for index, chunk in enumerate(chunks)
-                ]
+                ],
             )
             await session.commit()
             break
@@ -178,20 +184,26 @@ class DocumentIngestPipeline:
             break
 
     async def process_document(
-        self, file_path: str, project_ids: List[str], description: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self,
+        file_path: str,
+        project_ids: list[str],
+        description: str | None = None,
+    ) -> dict[str, Any]:
         del description
         document_id = str(uuid.uuid4())
         file_type = self._file_type(file_path)
         content_hash = self._content_hash(file_path)
         if self.vector_store is None:
-            # Creating the Milvus client performs I/O, so defer it until an actual ingestion run.
-            from src.db.milvus_client import milvus_client
+            from src.db.vector_store import get_vector_store
 
-            self.vector_store = milvus_client
-        vector_ids: List[str] = []
+            self.vector_store = get_vector_store()
+        vector_ids: list[str] = []
         document_id, existing = await self._create_document(
-            document_id, file_path, file_type, content_hash, project_ids
+            document_id,
+            file_path,
+            file_type,
+            content_hash,
+            project_ids,
         )
         if existing is not None:
             return existing
@@ -212,7 +224,7 @@ class DocumentIngestPipeline:
                             "content": content,
                             "content_type": chunk_result.content_type,
                             "metadata": dict(chunk_result.metadata),
-                        }
+                        },
                     )
             if not chunks:
                 raise ValueError("文档未生成可索引的文本块")

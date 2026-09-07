@@ -1,21 +1,27 @@
-from fastapi import APIRouter, HTTPException
-from src.schemas.search import SearchRequest, SearchResponse
+import time
+
+from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.api.dependencies import get_searcher
 from src.core.retrieval.hybrid_search import HybridSearch
 from src.core.retrieval.hydration import hydrate_search_results
-from loguru import logger
-import time
+from src.db.postgres import get_db
+from src.schemas.search import SearchRequest, SearchResponse
 
 router = APIRouter()
 
 
 @router.post("", response_model=SearchResponse)
-async def search(request: SearchRequest):
+async def search(
+    request: SearchRequest,
+    searcher: HybridSearch = Depends(get_searcher),
+    session: AsyncSession = Depends(get_db),
+):
     """执行搜索"""
     try:
         start_time = time.time()
-
-        # 初始化搜索器
-        searcher = HybridSearch()
 
         # 执行搜索
         results = searcher.search(
@@ -24,10 +30,15 @@ async def search(request: SearchRequest):
             top_k=request.top_k,
             include_outdated=request.include_outdated,
             content_types=request.content_types,
+            time_decay_enabled=request.time_decay_enabled,
         )
 
         # Milvus is an index only; hydrate authoritative text and locators from PostgreSQL.
-        hydrated_results = await hydrate_search_results(results, request.project_ids)
+        hydrated_results = await hydrate_search_results(
+            results,
+            request.project_ids,
+            session=session,
+        )
         search_results = []
         for result in hydrated_results:
             search_result = {
@@ -42,18 +53,36 @@ async def search(request: SearchRequest):
                 "score": result.get("score", 0),
                 "project_ids": result.get("project_ids", []),
                 "created_at": result["created_at"],
-                "retrieval": {key: result[key] for key in ("score", "rank") if key in result},
+                "retrieval": {
+                    key: result[key]
+                    for key in (
+                        "score",
+                        "dense_score",
+                        "dense_rank",
+                        "bm25_score",
+                        "bm25_rank",
+                        "rrf_score",
+                        "rrf_rank",
+                        "rerank_score",
+                        "rerank_rank",
+                        "retrieval_channels",
+                        "retrieval_degraded",
+                    )
+                    if key in result
+                },
             }
             search_results.append(search_result)
 
         query_time_ms = int((time.time() - start_time) * 1000)
 
         logger.info(
-            f"搜索完成: 查询='{request.query}', 结果数={len(search_results)}, 耗时={query_time_ms}ms"
+            f"搜索完成: 查询='{request.query}', 结果数={len(search_results)}, 耗时={query_time_ms}ms",
         )
 
         return SearchResponse(
-            results=search_results, total=len(search_results), query_time_ms=query_time_ms
+            results=search_results,
+            total=len(search_results),
+            query_time_ms=query_time_ms,
         )
 
     except Exception as e:

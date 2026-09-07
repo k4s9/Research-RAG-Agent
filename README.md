@@ -9,7 +9,7 @@
 - **文档上传与解析**：支持 PDF、Markdown 等格式的文档上传和解析
 - **智能切片**：自动将文档切分为合适大小的 chunks，便于检索
 - **向量嵌入**：使用 Qwen3-Embedding 模型将文本转换为向量表示
-- **混合检索**：结合 Dense 检索和时间衰减，提供精准的检索结果
+- **检索**：当前生产路径为 Dense 检索，时间衰减为可选后处理；BM25 + RRF + Reranker 仍在 Phase 3 实现中
 - **RAG 问答**：基于检索结果和大语言模型，提供智能问答服务
 - **项目管理**：支持按项目组织和管理文档
 - **Web 界面**：提供直观的 Gradio 界面，方便用户操作
@@ -26,6 +26,9 @@
 - **文档解析**：PyMuPDF (fitz)
 
 ## 安装步骤
+
+> 当前项目处于 experimental 状态。本地离线 E2E 已可运行，真实 PostgreSQL/Milvus/模型
+> E2E 仍需按环境配置执行；BM25 + RRF + Reranker 生产链路尚未完成。
 
 ### 1. 克隆项目
 
@@ -54,9 +57,22 @@ pip install -e ".[dev]"
 ### 4. 初始化数据库
 
 ```bash
-python scripts/init_db.py      # 创建 PostgreSQL 表
+python scripts/init_db.py      # 安全执行 Alembic 迁移，不会删除旧表
 python scripts/init_milvus.py  # 创建 Milvus Collection
 ```
+
+### 无 Docker 的 WSL 离线流程
+
+```bash
+cp .env.local.example .env
+pip install -e ".[dev]"
+python scripts/init_db.py
+python -m pytest -m e2e -v
+uvicorn src.main:app --host 127.0.0.1 --port 8002
+```
+
+Embedding/Reranker 远程 API 协议、环境变量和验证命令见
+[`docs/model_api_configuration.md`](docs/model_api_configuration.md)。
 
 ### 5. 启动服务
 
@@ -119,4 +135,3 @@ research-rag-agent/
 ## 许可证
 
 MIT
-

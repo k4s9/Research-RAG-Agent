@@ -7,10 +7,26 @@ class Settings(BaseSettings):
     # Database
     postgres_url: str = "postgresql+asyncpg://raguser:changeme@localhost:5432/rag_db"
     milvus_uri: str = "http://localhost:19530"
+    vector_store_backend: str = "milvus"
 
     # Models
     bge_m3_model_path: str = "BAAI/bge-m3"
     reranker_model_path: str = "BAAI/bge-reranker-v2-m3"
+    embedding_provider: str = "remote"
+    embedding_base_url: str = "http://localhost:8000"
+    embedding_endpoint: str = "/v1/embeddings"
+    embedding_api_key: str = ""
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
+    embedding_dimension: int = 1024
+    embedding_timeout_seconds: float = 30.0
+    reranker_provider: str = "remote"
+    reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
+    reranker_base_url: str = "http://localhost:8001"
+    reranker_endpoint: str = "/rerank"
+    reranker_api_key: str = ""
+    reranker_timeout_seconds: float = 30.0
+    request_retry_attempts: int = 2
+    request_retry_backoff_seconds: float = 0.25
 
     # LLM
     llm_provider: str = "deepseek"  # or "openai"
@@ -38,7 +54,8 @@ class Settings(BaseSettings):
 
     # Server
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8002
+    api_client_url: str = "http://127.0.0.1:8002"
     gradio_port: int = 7860
 
 

@@ -4,6 +4,19 @@
 > 审计范围：当前仓库的 PDF/Markdown 摄入、存储、检索、回答、引用、评测和 Agent 实现  
 > 目标：先把项目做成可运行、可验证、可复现实验的 RAG 系统，再将它描述为简历核心项目。
 
+## 0.1 2026-08-10 WSL 离线 E2E 实现快照
+
+**简历准入结论仍为不通过。** 已实现不依赖 Docker 的离线 E2E：SQLite、内存向量索引、确定性 local embedding/LLM 适配器跑通 2 PDF + 2 Markdown 上传 -> ready -> 搜索 -> 回答 -> 结构化引用；与 PostgreSQL、Milvus、真实 Embedding/Reranker/LLM 相连的 live integration/E2E 用例已加入，默认明确 skip，等待服务配置后执行。
+
+| 新增证据 | 结果 | 仍不能替代的证据 |
+|---|---|---|
+| `make test-unit` | 25 passed | 不测真实外部服务 |
+| `make test-integration` | live 模型契约测试默认 skip | 远程 embedding/reranker 实际协议和健康检查 |
+| `make test-e2e` | 离线 2 PDF + 2 Markdown 通过；live 用例默认 skip | PostgreSQL + Milvus + 真实模型的完整 E2E、双存储一致性 |
+| 空 SQLite 迁移 | Alembic 创建完整 schema | 真实 PostgreSQL 迁移和旧库回填 |
+
+本地向量索引仅用于工作流回归，重启后不保留向量，不可用于质量评测或简历指标。Reranker 已具备可配置客户端与 live 契约测试，但尚未进入生产检索链路；BM25 + RRF + Reranker 仍是 Phase 3 的未完成工作。
+
 ## 0. 2026-08-09 复核快照
 
 **简历准入结论：不通过，暂不能提升为简历核心项目。** 当前已完成摄入和结构化引用的主要代码路径与离线单测，但没有真实服务 E2E；BM25 四阶段检索、50-100 条评测集、质量/性能报告和原生 Tool Calling 循环均未完成。
@@ -138,11 +151,11 @@ Embedding、Milvus 插入、Reranker 或 LLM 失败不得伪装为成功：
 
 ## Phase 0：建立可测试基线（0.5-1 天）
 
-**状态：部分完成（2026-08-09 复核）**
+**状态：部分完成（2026-08-10 复核）**
 
 **验证记录：** 原 `tests/test_api/test_upload.py` 在导入阶段访问本地文件并调用 `exit(1)`，现已移除并替换为标准 pytest 单元测试。`python -m pytest --collect-only -q` 已成功收集 10 项测试，`python -m pytest -q` 已通过 10 项测试；新增 `unit`、`integration`、`e2e` markers 与 `Makefile` 测试入口。完整仓库 `ruff check` 仍有大量既有历史问题，本阶段只完成了改动模块的编译和功能测试，未将全量 lint 清理虚报为完成。
 
-**2026-08-09 复核修正：** 当前已增长为 21 项单测且 `python -m pytest -q` 全过，但 Makefile 标准入口会因导入路径失败，integration/e2e marker 没有对应测试，固定 fixtures 也不存在。因此 Phase 0 从“已完成”回退为“部分完成”，直到标准命令和分层测试真实可用。
+**2026-08-10 复核修正：** `make test-unit` 现为 25 passed，`make test-integration` 和 `make test-e2e` 都能稳定收集测试；离线 E2E 使用程序生成的固定四文档语料通过，真实服务用例在未配置时明确 skip。全量 Ruff 仍未通过，因此 Phase 0 仍为部分完成。
 
 ### 任务
 
@@ -171,7 +184,7 @@ Embedding、Milvus 插入、Reranker 或 LLM 失败不得伪装为成功：
 
 **已验证：** 真实 PDF/Markdown parser、页码/章节 locator、扩展名分流、成功状态和向量写入失败补偿均由 10 项离线单元测试覆盖。
 
-**待完成/待验证：** PostgreSQL + Milvus + Embedding 服务的真实端到端测试、并发重复提交时数据库唯一冲突的集成验证、现有数据库 content hash 回填，以及在真实 PostgreSQL 上执行 Alembic revision。当前环境没有可用的完整外部服务，故尚未声称端到端链路已跑通，Phase 1 仍保持进行中。
+**待完成/待验证：** 离线 E2E 已通过；仍待 PostgreSQL + Milvus + Embedding 服务的真实端到端测试、并发重复提交时数据库唯一冲突的集成验证、现有数据库 content hash 回填，以及在真实 PostgreSQL 上执行 Alembic revision。Phase 1 仍保持进行中。
 
 ### 任务
 

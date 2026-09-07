@@ -6,10 +6,34 @@ import pytest
 from src.core.ingest.markdown_chunker import MarkdownChunker
 from src.core.ingest.markdown_parser import EnhancedMarkdownParser
 from src.core.ingest.pdf_chunker import PDFChunker
+from src.core.ingest.pdf_cleaner import PDFCleaner
 from src.core.ingest.pdf_parser import PDFParser
 
 
 pytestmark = pytest.mark.unit
+
+
+def test_pdf_cleaner_does_not_remove_single_page_body_as_header() -> None:
+    parsed = {
+        "file_type": "pdf",
+        "pages": [
+            {
+                "page_num": 1,
+                "height": 800,
+                "text": "Single page evidence remains searchable.",
+                "blocks": [
+                    {
+                        "text": "Single page evidence remains searchable.",
+                        "bbox": [72, 72, 400, 90],
+                    }
+                ],
+            }
+        ],
+    }
+
+    cleaned = PDFCleaner().clean(parsed)
+
+    assert cleaned["pages"][0]["text"] == "Single page evidence remains searchable."
 
 
 def test_pdf_chunker_preserves_one_based_page_locator() -> None:

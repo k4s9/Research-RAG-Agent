@@ -1,11 +1,12 @@
 import gradio as gr
 import requests
 import json
+import mimetypes
 import uuid
 from src.config.settings import settings
 
 # API 基础 URL
-API_BASE_URL = f"http://{settings.api_host}:8002"
+API_BASE_URL = settings.api_client_url.rstrip("/")
 
 # 生成会话 ID
 session_id = str(uuid.uuid4())
@@ -23,7 +24,8 @@ def upload_file(file, project_ids, description):
         import os
         filename = os.path.basename(file)
         # 构建文件对象
-        files = {"file": (filename, open(file, "rb"), "application/octet-stream")}
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        files = {"file": (filename, open(file, "rb"), mime_type)}
         data = {
             "project_ids": json.dumps(project_ids_list),
             "description": description

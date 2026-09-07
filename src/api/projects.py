@@ -1,35 +1,40 @@
-from fastapi import APIRouter, HTTPException
-from src.schemas.project import ProjectCreateRequest, ProjectResponse, ProjectListResponse
+from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.db.models import Project
+from src.db.postgres import get_db
+from src.schemas.project import ProjectCreateRequest, ProjectListResponse, ProjectResponse
 
 router = APIRouter()
 
-@router.post("", response_model=ProjectResponse)
-async def create_project(request: ProjectCreateRequest):
-    """创建项目"""
-    # 这里将实现项目创建逻辑
-    # 暂时返回模拟响应
+
+def _response(project: Project) -> ProjectResponse:
     return ProjectResponse(
-        id="proj-uuid-xxx",
-        name=request.name,
-        description=request.description,
-        created_at="2026-03-30T10:00:00Z",
-        updated_at="2026-03-30T10:00:00Z"
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        created_at=project.created_at.isoformat(),
+        updated_at=project.updated_at.isoformat(),
     )
 
+
+@router.post("", response_model=ProjectResponse, status_code=201)
+async def create_project(
+    request: ProjectCreateRequest,
+    session: AsyncSession = Depends(get_db),
+) -> ProjectResponse:
+    project = Project(name=request.name.strip(), description=request.description)
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+    return _response(project)
+
+
 @router.get("", response_model=ProjectListResponse)
-async def get_projects():
-    """获取项目列表"""
-    # 这里将实现项目列表查询逻辑
-    # 暂时返回模拟响应
+async def get_projects(session: AsyncSession = Depends(get_db)) -> ProjectListResponse:
+    result = await session.execute(select(Project).order_by(Project.created_at.desc()))
+    projects = list(result.scalars().all())
     return ProjectListResponse(
-        projects=[
-            {
-                "id": "proj-uuid-xxx",
-                "name": "注意力机制研究",
-                "description": "研究 Transformer 注意力机制的优化方案",
-                "created_at": "2026-03-30T10:00:00Z",
-                "updated_at": "2026-03-30T10:00:00Z"
-            }
-        ],
-        total=1
+        projects=[_response(project) for project in projects], total=len(projects)
     )

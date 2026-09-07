@@ -1,5 +1,6 @@
-from typing import Dict, Any, List, Set
 import re
+from typing import Any
+
 from loguru import logger
 
 from src.core.ingest.base import BaseCleaner
@@ -11,14 +12,14 @@ class PDFCleaner(BaseCleaner):
         header_threshold: float = 0.25,
         footer_threshold: float = 0.80,
         frequency_threshold: float = 0.6,
-        text_quality_threshold: float = 0.5
+        text_quality_threshold: float = 0.5,
     ):
         self.header_threshold = header_threshold
         self.footer_threshold = footer_threshold
         self.frequency_threshold = frequency_threshold
         self.text_quality_threshold = text_quality_threshold
 
-    def clean(self, parsed_content: Dict[str, Any]) -> Dict[str, Any]:
+    def clean(self, parsed_content: dict[str, Any]) -> dict[str, Any]:
         if parsed_content.get("file_type") == "markdown":
             logger.warning("PDFCleaner 收到了 Markdown 内容，应使用 MarkdownCleaner")
             return parsed_content
@@ -61,11 +62,15 @@ class PDFCleaner(BaseCleaner):
         result["filtered_footers"] = filtered_footers
         result["cleaning_applied"] = True
 
-        logger.info(f"PDF 清洗完成: 过滤了 {len(filtered_headers)} 个页眉和 {len(filtered_footers)} 个页脚")
+        logger.info(
+            f"PDF 清洗完成: 过滤了 {len(filtered_headers)} 个页眉和 {len(filtered_footers)} 个页脚"
+        )
         return result
 
-    def _filter_page_numbers(self, candidates: List[str]) -> List[str]:
-        page_number_pattern = re.compile(r'^\d+$|^\d+\s*$|^第\s*\d+\s*页$|^Page\s*\d+$|^p\.\s*\d+$', re.IGNORECASE)
+    def _filter_page_numbers(self, candidates: list[str]) -> list[str]:
+        page_number_pattern = re.compile(
+            r"^\d+$|^\d+\s*$|^第\s*\d+\s*页$|^Page\s*\d+$|^p\.\s*\d+$", re.IGNORECASE
+        )
         filtered = []
         for text in candidates:
             if page_number_pattern.match(text.strip()):
@@ -75,7 +80,9 @@ class PDFCleaner(BaseCleaner):
             filtered.append(text)
         return filtered
 
-    def _detect_repeated_text(self, candidates: List[str], total_pages: int) -> List[str]:
+    def _detect_repeated_text(self, candidates: list[str], total_pages: int) -> list[str]:
+        if total_pages < 2:
+            return []
         text_counts = {}
         for text in candidates:
             if text.strip() and len(text.strip()) > 2:
@@ -102,7 +109,9 @@ class PDFCleaner(BaseCleaner):
 
         return alpha_ratio >= self.text_quality_threshold
 
-    def _clean_page(self, page: Dict[str, Any], headers: List[str], footers: List[str]) -> Dict[str, Any]:
+    def _clean_page(
+        self, page: dict[str, Any], headers: list[str], footers: list[str]
+    ) -> dict[str, Any]:
         blocks = page.get("blocks", [])
         original_text = page.get("text", "")
         page_height = page.get("height", 800)
@@ -111,12 +120,18 @@ class PDFCleaner(BaseCleaner):
 
         if self._is_text_quality_good(original_text):
             cleaned_text = self._remove_headers_footers_from_text(
-                original_text, headers, footers, page_height
+                original_text,
+                headers,
+                footers,
+                page_height,
             )
             cleaned_page["text"] = cleaned_text
         else:
             cleaned_blocks = self._filter_blocks_by_position(
-                blocks, headers, footers, page_height
+                blocks,
+                headers,
+                footers,
+                page_height,
             )
             cleaned_text = self._build_text_from_blocks(cleaned_blocks)
             cleaned_page["text"] = cleaned_text if cleaned_text else original_text
@@ -127,9 +142,9 @@ class PDFCleaner(BaseCleaner):
     def _remove_headers_footers_from_text(
         self,
         text: str,
-        headers: List[str],
-        footers: List[str],
-        page_height: float
+        headers: list[str],
+        footers: list[str],
+        page_height: float,
     ) -> str:
         lines = text.split("\n")
         cleaned_lines = []
@@ -168,11 +183,11 @@ class PDFCleaner(BaseCleaner):
 
     def _filter_blocks_by_position(
         self,
-        blocks: List[Dict],
-        headers: List[str],
-        footers: List[str],
-        page_height: float
-    ) -> List[Dict]:
+        blocks: list[dict],
+        headers: list[str],
+        footers: list[str],
+        page_height: float,
+    ) -> list[dict]:
         header_region = page_height * self.header_threshold
         footer_region = page_height * self.footer_threshold
 
@@ -206,14 +221,17 @@ class PDFCleaner(BaseCleaner):
 
         return filtered_blocks
 
-    def _build_text_from_blocks(self, blocks: List[Dict]) -> str:
+    def _build_text_from_blocks(self, blocks: list[dict]) -> str:
         if not blocks:
             return ""
 
-        sorted_blocks = sorted(blocks, key=lambda b: (
-            b.get("bbox", [0, 0, 0, 0])[1],
-            b.get("bbox", [0, 0, 0, 0])[0]
-        ))
+        sorted_blocks = sorted(
+            blocks,
+            key=lambda b: (
+                b.get("bbox", [0, 0, 0, 0])[1],
+                b.get("bbox", [0, 0, 0, 0])[0],
+            ),
+        )
 
         lines = []
         current_line_blocks = []
@@ -248,7 +266,7 @@ class PDFCleaner(BaseCleaner):
 
         return "\n".join(lines)
 
-    def _merge_blocks_to_line(self, blocks: List[Dict]) -> str:
+    def _merge_blocks_to_line(self, blocks: list[dict]) -> str:
         if not blocks:
             return ""
 

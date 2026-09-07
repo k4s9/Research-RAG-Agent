@@ -1,18 +1,19 @@
 import codecs
 import json
-import uuid
-
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 import os
+import uuid
 from pathlib import Path
-from typing import Optional
-from loguru import logger
 
-from src.schemas.document import DocumentUploadResponse, DocumentStatusResponse
-from src.core.ingest.pipeline import DocumentIngestPipeline
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.api.dependencies import get_ingest_pipeline
 from src.config.settings import settings
+from src.core.ingest.pipeline import DocumentIngestPipeline
 from src.db.models import Document
 from src.db.postgres import get_db
+from src.schemas.document import DocumentStatusResponse, DocumentUploadResponse
 
 router = APIRouter()
 
@@ -42,7 +43,8 @@ def _write_upload(file: UploadFile, file_path: Path, suffix: str) -> None:
                         utf8_decoder.decode(block, final=False)
                     except UnicodeDecodeError as exc:
                         raise HTTPException(
-                            status_code=400, detail="Markdown 文件必须使用 UTF-8"
+                            status_code=400,
+                            detail="Markdown 文件必须使用 UTF-8",
                         ) from exc
                 destination.write(block)
         if not first_block:
@@ -71,7 +73,8 @@ os.makedirs(settings.upload_dir, exist_ok=True)
 async def upload_document(
     file: UploadFile = File(...),
     project_ids: str = Form(...),
-    description: Optional[str] = Form(None),
+    description: str | None = Form(None),
+    pipeline: DocumentIngestPipeline = Depends(get_ingest_pipeline),
 ):
     """上传文档"""
     try:
@@ -98,7 +101,6 @@ async def upload_document(
         logger.info(f"文件上传成功: {safe_name}")
 
         # 启动文档处理流水线
-        pipeline = DocumentIngestPipeline()
         result = await pipeline.process_document(str(file_path), project_ids_list, description)
         if result.get("deduplicated"):
             file_path.unlink(missing_ok=True)
@@ -107,7 +109,7 @@ async def upload_document(
         return DocumentUploadResponse(
             document_id=result["document_id"],
             status=result["status"],
-            message="文档已提交解析，请通过 /documents/{doc_id}/status 查询进度",
+            message="文档解析与索引已完成",
         )
 
     except HTTPException:
@@ -118,23 +120,22 @@ async def upload_document(
 
 
 @router.get("/{doc_id}/status", response_model=DocumentStatusResponse)
-async def get_document_status(doc_id: str):
+async def get_document_status(doc_id: str, session: AsyncSession = Depends(get_db)):
     """查询文档解析状态"""
-    async for session in get_db():
-        document = await session.get(Document, doc_id)
-        if document is None:
-            raise HTTPException(status_code=404, detail="文档不存在")
-        metadata = document.parse_metadata or {}
-        message = {
-            "ready": "文档解析和索引完成",
-            "processing": "文档正在处理中",
-            "failed": "文档处理失败",
-        }.get(document.status, "文档状态未知")
-        return DocumentStatusResponse(
-            document_id=document.id,
-            status=document.status,
-            message=message,
-            stage=metadata.get("stage"),
-            chunk_count=metadata.get("chunk_count"),
-            error=metadata.get("error"),
-        )
+    document = await session.get(Document, doc_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    metadata = document.parse_metadata or {}
+    message = {
+        "ready": "文档解析和索引完成",
+        "processing": "文档正在处理中",
+        "failed": "文档处理失败",
+    }.get(document.status, "文档状态未知")
+    return DocumentStatusResponse(
+        document_id=document.id,
+        status=document.status,
+        message=message,
+        stage=metadata.get("stage"),
+        chunk_count=metadata.get("chunk_count"),
+        error=metadata.get("error"),
+    )

@@ -1,6 +1,8 @@
-from pymilvus import MilvusClient, DataType
-from src.config.settings import settings
 from loguru import logger
+from pymilvus import DataType, MilvusClient
+
+from src.config.settings import settings
+from src.core.retrieval.bm25 import BM25Retriever
 
 COLLECTION_NAME = "knowledge_chunks"
 REQUIRED_FIELDS = {
@@ -51,7 +53,11 @@ class MilvusClientWrapper:
                 is_primary=True,
             )
             schema.add_field(field_name="entity_type", datatype=DataType.VARCHAR, max_length=16)
-            schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=1024)
+            schema.add_field(
+                field_name="dense_vector",
+                datatype=DataType.FLOAT_VECTOR,
+                dim=settings.embedding_dimension,
+            )
             schema.add_field(
                 field_name="project_ids",
                 datatype=DataType.ARRAY,
@@ -107,7 +113,7 @@ class MilvusClientWrapper:
             insert_count = result.get("insert_count", 0)
             if insert_count != len(entities):
                 raise RuntimeError(
-                    f"Milvus 插入数量不一致: expected={len(entities)}, actual={insert_count}"
+                    f"Milvus 插入数量不一致: expected={len(entities)}, actual={insert_count}",
                 )
             logger.info(f"成功插入 {insert_count} 条数据到 Milvus")
             return result
@@ -147,11 +153,47 @@ class MilvusClientWrapper:
                     "created_at",
                 ],
             )
-            logger.info(f"Milvus 搜索完成，返回 {len(result[0])} 条结果")
-            return result[0]
+            normalized = []
+            for hit in result[0]:
+                entity = dict(hit.get("entity", {}))
+                entity["id"] = hit.get("id", entity.get("id"))
+                entity["distance"] = hit.get("distance", 0.0)
+                entity["score"] = 1.0 / (1.0 + max(float(entity["distance"]), 0.0))
+                normalized.append(entity)
+            logger.info(f"Milvus 搜索完成，返回 {len(normalized)} 条结果")
+            return normalized
         except Exception as e:
             logger.error(f"Milvus 搜索失败: {str(e)}")
-            return []
+            raise
+
+    def keyword_search(self, query: str, top_k: int = 10, filter: str = None):
+        """Run BM25 over the authoritative text stored in Milvus.
+
+        Milvus remains the source of candidate records and scalar filtering;
+        BM25 scoring is performed locally over those records. This keeps the
+        same API available for the in-memory development backend while leaving
+        room to replace this method with a native sparse index later.
+        """
+        try:
+            limit = max(top_k, settings.sparse_top_k)
+            rows = self.client.query(
+                collection_name=self.collection_name,
+                filter=filter or "",
+                output_fields=[
+                    "id",
+                    "entity_type",
+                    "content",
+                    "project_ids",
+                    "version_status",
+                    "content_type",
+                    "created_at",
+                ],
+                limit=limit,
+            )
+            return BM25Retriever().search(query, rows, top_k=top_k)
+        except Exception as exc:
+            logger.error(f"Milvus BM25 搜索失败: {exc}")
+            raise
 
     def has_collection(self, collection_name: str):
         """检查集合是否存在"""

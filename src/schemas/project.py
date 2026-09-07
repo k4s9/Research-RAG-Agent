@@ -1,17 +1,19 @@
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+
 
 class ProjectCreateRequest(BaseModel):
-    name: str
-    description: Optional[str] = None
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
 
 class ProjectResponse(BaseModel):
     id: str
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     created_at: str
     updated_at: str
 
+
 class ProjectListResponse(BaseModel):
-    projects: List[ProjectResponse]
+    projects: list[ProjectResponse]
     total: int

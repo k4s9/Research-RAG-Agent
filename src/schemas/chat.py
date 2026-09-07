@@ -1,19 +1,20 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
-from typing import Any, List
 
 
 class ChatMessageRequest(BaseModel):
     session_id: str
-    project_ids: List[str]
+    project_ids: list[str]
     message: str
-    include_outdated: bool
+    include_outdated: bool = False
 
 
 class ExtractedMemory(BaseModel):
     memory_id: str
     type: str
     summary: str
-    outdated_references: List[str]
+    outdated_references: list[str]
 
 
 class RetrievedContext(BaseModel):
@@ -28,10 +29,11 @@ class RetrievedContext(BaseModel):
 class ChatMessageResponse(BaseModel):
     session_id: str
     response: str
-    extracted_memories: List[ExtractedMemory]
-    retrieved_context: List[RetrievedContext]
-    citations: List[dict[str, Any]] = Field(default_factory=list)
-    invalid_citation_ids: List[str] = Field(default_factory=list)
+    extracted_memories: list[ExtractedMemory]
+    retrieved_context: list[RetrievedContext]
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    invalid_citation_ids: list[str] = Field(default_factory=list)
+    tool_trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatMessageItem(BaseModel):
@@ -42,4 +44,4 @@ class ChatMessageItem(BaseModel):
 
 class ChatSessionResponse(BaseModel):
     session_id: str
-    messages: List[ChatMessageItem]
+    messages: list[ChatMessageItem]

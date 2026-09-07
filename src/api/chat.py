@@ -1,24 +1,27 @@
-from fastapi import APIRouter, HTTPException
-from src.schemas.chat import ChatMessageRequest, ChatMessageResponse, ChatSessionResponse
-from src.core.agent.orchestrator import AgentOrchestrator
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+
+from src.api.dependencies import get_orchestrator
+from src.core.agent.orchestrator import AgentOrchestrator
+from src.schemas.chat import ChatMessageRequest, ChatMessageResponse, ChatSessionResponse
 
 router = APIRouter()
 
 
 @router.post("/message", response_model=ChatMessageResponse)
-async def send_message(request: ChatMessageRequest):
+async def send_message(
+    request: ChatMessageRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """发送对话消息"""
     try:
-        # 初始化 Agent 编排器
-        orchestrator = AgentOrchestrator()
-
         # 处理消息
         result = await orchestrator.handle_message(
             message=request.message,
             project_ids=request.project_ids,
             session_id=request.session_id,
             history=None,  # 暂时不处理历史对话
+            include_outdated=request.include_outdated,
         )
 
         # 构建响应
@@ -29,6 +32,7 @@ async def send_message(request: ChatMessageRequest):
             retrieved_context=result["retrieved_context"],
             citations=result.get("citations", []),
             invalid_citation_ids=result.get("invalid_citation_ids", []),
+            tool_trace=result.get("tool_trace", []),
         )
 
         logger.info(f"聊天消息处理完成: session_id={request.session_id}")

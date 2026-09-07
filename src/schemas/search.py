@@ -1,15 +1,16 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
-from typing import Any, List
 
 
 class SearchRequest(BaseModel):
-    query: str
-    project_ids: List[str]
-    cross_project: bool
-    include_outdated: bool
-    content_types: List[str]
-    top_k: int
-    time_decay_enabled: bool
+    query: str = Field(min_length=1)
+    project_ids: list[str]
+    cross_project: bool = False
+    include_outdated: bool = False
+    content_types: list[str] = Field(default_factory=list)
+    top_k: int = Field(default=5, ge=1, le=100)
+    time_decay_enabled: bool = False
 
 
 class SearchResultItem(BaseModel):
@@ -22,12 +23,12 @@ class SearchResultItem(BaseModel):
     locator: dict[str, Any] = Field(default_factory=dict)
     source: str = ""
     score: float
-    project_ids: List[str]
+    project_ids: list[str]
     created_at: str = ""
     retrieval: dict[str, Any] = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):
-    results: List[SearchResultItem]
+    results: list[SearchResultItem]
     total: int
     query_time_ms: int

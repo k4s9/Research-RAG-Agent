@@ -1,10 +1,13 @@
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, JSON, Table
-from sqlalchemy.orm import relationship
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base, relationship
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 Base = declarative_base()
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # 多对多关系表
 project_document = Table(
@@ -33,8 +36,8 @@ class Project(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
     
     # 关系
     documents = relationship('Document', secondary=project_document, back_populates='projects')
@@ -50,8 +53,8 @@ class Document(Base):
     content_hash = Column(String(64), nullable=True, unique=True, index=True)
     status = Column(String(20), nullable=False)  # processing/ready/failed
     parse_metadata = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
     
     # 关系
     chunks = relationship('Chunk', back_populates='document')
@@ -67,7 +70,7 @@ class Chunk(Base):
     chunk_metadata = Column(JSON, nullable=True)
     version_status = Column(String(20), nullable=False, default='active')  # active/outdated
     superseded_by = Column(String(36), ForeignKey('chunk.id'), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
     
     # 关系
     document = relationship('Document', back_populates='chunks')
@@ -79,7 +82,7 @@ class Conversation(Base):
     session_id = Column(String(36), nullable=False)
     role = Column(String(20), nullable=False)  # user/assistant
     content = Column(Text, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=utc_now)
     
     # 关系
     projects = relationship('Project', secondary=project_conversation, back_populates='conversations')
@@ -95,7 +98,7 @@ class Memory(Base):
     source_chunk_id = Column(String(36), ForeignKey('chunk.id'), nullable=True)
     version_status = Column(String(20), nullable=False, default='active')  # active/outdated
     superseded_by = Column(String(36), ForeignKey('memory.id'), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
     resolved_at = Column(DateTime, nullable=True)  # for todos
     
     # 关系
@@ -112,7 +115,7 @@ class VersionLog(Base):
     action = Column(String(20), nullable=False)  # create/update/outdated/restore
     reason = Column(Text, nullable=True)
     actor_conversation_id = Column(String(36), ForeignKey('conversation.id'), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now)
     
     # 关系
     actor_conversation = relationship('Conversation')
