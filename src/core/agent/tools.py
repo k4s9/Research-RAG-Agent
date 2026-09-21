@@ -15,6 +15,14 @@ from loguru import logger
 from sqlalchemy import select
 
 from src.core.citations import source_locator
+from src.core.document_view import (
+    DEFAULT_RANGE_CHARS,
+    MAX_RANGE_CHARS,
+    build_document_outline,
+    chunk_page_range,
+    select_document_range,
+)
+from src.core.ingest.metadata import DOC_TYPES
 from src.core.retrieval.hydration import hydrate_search_results
 from src.db.models import Chunk, Conversation, Document, Memory, Project, project_document
 from src.db.postgres import get_db
@@ -33,6 +41,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
                     "include_outdated": {"type": "boolean"},
                     "content_types": {"type": "array", "items": {"type": "string"}},
+                    "doc_types": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(DOC_TYPES)},
+                    },
+                    "tags": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -53,6 +66,67 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "section_path": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_documents",
+            "description": (
+                "List the materials in the project registry, optionally filtered by "
+                "document type, tag, year, or ingest batch. Use it to answer "
+                "'what have I uploaded'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_ids": {"type": "array", "items": {"type": "string"}},
+                    "doc_type": {"type": "string", "enum": list(DOC_TYPES)},
+                    "tag": {"type": "string"},
+                    "year": {"type": "integer", "minimum": 1900, "maximum": 2100},
+                    "ingest_batch_id": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_document_outline",
+            "description": "Return the section/page skeleton of one document for reading planning.",
+            "parameters": {
+                "type": "object",
+                "properties": {"document_id": {"type": "string", "minLength": 1}},
+                "required": ["document_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_document_range",
+            "description": (
+                "Read consecutive chunks of one document in document order, by page range "
+                "or section path. Use it for close reading instead of scattered search hits."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "minLength": 1},
+                    "page_start": {"type": "integer", "minimum": 1},
+                    "page_end": {"type": "integer", "minimum": 1},
+                    "section_path": {"type": "array", "items": {"type": "string"}},
+                    "max_chars": {"type": "integer", "minimum": 200, "maximum": MAX_RANGE_CHARS},
+                    "start_chunk_index": {"type": "integer", "minimum": 0},
+                    "start_char": {"type": "integer", "minimum": 0},
+                },
+                "required": ["document_id"],
                 "additionalProperties": False,
             },
         },
@@ -109,6 +183,14 @@ class ResearchToolRegistry:
             raise ToolExecutionError("tool project scope exceeds the caller project scope")
         return list(dict.fromkeys(requested))
 
+    @staticmethod
+    def _string_list(value: object, field: str) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ToolExecutionError(f"{field} must be an array of strings")
+        return [item.strip() for item in value if item.strip()]
+
     async def execute(
         self,
         name: str,
@@ -122,6 +204,9 @@ class ResearchToolRegistry:
         handlers = {
             "search_knowledge": self.search_knowledge,
             "get_document_section": self.get_document_section,
+            "list_documents": self.list_documents,
+            "get_document_outline": self.get_document_outline,
+            "read_document_range": self.read_document_range,
             "save_memory": self.save_memory,
         }
         handler = handlers.get(name)
@@ -134,8 +219,28 @@ class ResearchToolRegistry:
                 "top_k",
                 "include_outdated",
                 "content_types",
+                "doc_types",
+                "tags",
             },
             "get_document_section": {"chunk_id", "document_id", "page_start", "section_path"},
+            "list_documents": {
+                "project_ids",
+                "doc_type",
+                "tag",
+                "year",
+                "ingest_batch_id",
+                "limit",
+            },
+            "get_document_outline": {"document_id"},
+            "read_document_range": {
+                "document_id",
+                "page_start",
+                "page_end",
+                "section_path",
+                "max_chars",
+                "start_chunk_index",
+                "start_char",
+            },
             "save_memory": {
                 "memory_type",
                 "summary",
@@ -170,15 +275,30 @@ class ResearchToolRegistry:
             or not all(isinstance(item, str) for item in content_types)
         ):
             raise ToolExecutionError("content_types must be an array of strings")
+        doc_types = self._string_list(arguments.get("doc_types"), "doc_types")
+        tags = self._string_list(arguments.get("tags"), "tags")
+        if any(doc_type not in DOC_TYPES for doc_type in doc_types):
+            raise ToolExecutionError("doc_types must contain only paper/report/note/other")
+        filters: dict[str, Any] = {}
+        if doc_types or tags:
+            filters["chunk_ids"] = await self._matching_chunk_ids(scoped_projects, doc_types, tags)
+            if not filters["chunk_ids"]:
+                return {"query": query, "results": [], "result_count": 0, "retrieval_degraded": []}
         results = self.searcher.search(
             query=query.strip(),
             project_ids=scoped_projects,
             top_k=top_k,
             include_outdated=bool(arguments.get("include_outdated", False)),
             content_types=content_types,
+            **filters,
         )
         hydrated_results = results
         hydrated = await self.hydrator(hydrated_results, scoped_projects)
+        if doc_types:
+            hydrated = [item for item in hydrated if item.get("doc_type") in doc_types]
+        if tags:
+            hydrated = [item for item in hydrated if set(tags).intersection(item.get("tags") or [])]
+        hydrated = hydrated[:top_k]
         hydrated = [{**item, "source_id": f"S{index + 1}"} for index, item in enumerate(hydrated)]
         return {
             "query": query,
@@ -192,6 +312,33 @@ class ResearchToolRegistry:
                 },
             ),
         }
+
+    async def _matching_chunk_ids(
+        self,
+        project_ids: list[str],
+        doc_types: list[str],
+        tags: list[str],
+    ) -> list[str]:
+        """Resolve current metadata before either retrieval channel applies Top-K."""
+        async for session in self.db_session_factory():
+            statement = select(Document.id, Document.tags).where(
+                Document.projects.any(Project.id.in_(project_ids)),
+            )
+            if doc_types:
+                statement = statement.where(Document.doc_type.in_(doc_types))
+            rows = (await session.execute(statement)).all()
+            document_ids = [
+                doc_id
+                for doc_id, doc_tags in rows
+                if not tags or set(tags).intersection(doc_tags or [])
+            ]
+            if not document_ids:
+                return []
+            result = await session.execute(
+                select(Chunk.id).where(Chunk.document_id.in_(document_ids)),
+            )
+            return list(result.scalars().all())
+        raise ToolExecutionError("database session unavailable")
 
     async def get_document_section(
         self,
@@ -261,6 +408,217 @@ class ResearchToolRegistry:
             "filename": document.filename,
             "locator": source_locator(document.filename, document.file_type, chunk.chunk_metadata),
             "version_status": chunk.version_status,
+        }
+
+    @staticmethod
+    def _document_payload(document: Document) -> dict[str, Any]:
+        return {
+            "id": document.id,
+            "document_id": document.id,
+            "filename": document.filename,
+            "title": document.title,
+            "doc_type": document.doc_type,
+            "year": document.year,
+            "venue": document.venue,
+            "authors": list(document.authors or []),
+            "tags": list(document.tags or []),
+            "summary": document.summary,
+            "page_count": document.page_count,
+            "ingest_batch_id": document.ingest_batch_id,
+            "status": document.status,
+        }
+
+    async def _authorized_document(
+        self,
+        session: object,
+        document_id: str,
+        project_ids: list[str],
+    ) -> Document | None:
+        result = await session.execute(
+            select(Document)
+            .join(project_document, project_document.c.document_id == Document.id)
+            .where(
+                Document.id == document_id,
+                project_document.c.project_id.in_(project_ids),
+            ),
+        )
+        return result.scalars().first()
+
+    async def _document_chunks(self, session: object, document_id: str) -> list[Chunk]:
+        result = await session.execute(
+            select(Chunk).where(Chunk.document_id == document_id).order_by(Chunk.chunk_index.asc()),
+        )
+        return list(result.scalars().all())
+
+    async def list_documents(
+        self,
+        arguments: dict[str, Any],
+        *,
+        project_ids: list[str],
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Registry lookup: "which papers/reports did I upload?" """
+        del session_id
+        scoped_projects = self._scope(arguments.get("project_ids"), project_ids)
+        doc_type = arguments.get("doc_type")
+        if doc_type is not None and doc_type not in DOC_TYPES:
+            raise ToolExecutionError("doc_type must be one of paper/report/note/other")
+        tag = arguments.get("tag")
+        if tag is not None and (not isinstance(tag, str) or not tag.strip()):
+            raise ToolExecutionError("tag must be a non-empty string")
+        year = arguments.get("year")
+        if year is not None and (not isinstance(year, int) or not 1900 <= year <= 2100):
+            raise ToolExecutionError("year must be between 1900 and 2100")
+        ingest_batch_id = arguments.get("ingest_batch_id")
+        if ingest_batch_id is not None and (
+            not isinstance(ingest_batch_id, str) or not ingest_batch_id.strip()
+        ):
+            raise ToolExecutionError("ingest_batch_id must be a non-empty string")
+        limit = arguments.get("limit", 20)
+        if not isinstance(limit, int) or not 1 <= limit <= 50:
+            raise ToolExecutionError("limit must be between 1 and 50")
+
+        documents: list[Document] = []
+        async for session in self.db_session_factory():
+            statement = select(Document).where(
+                Document.projects.any(Project.id.in_(scoped_projects)),
+            )
+            if doc_type:
+                statement = statement.where(Document.doc_type == doc_type)
+            if year is not None:
+                statement = statement.where(Document.year == year)
+            if ingest_batch_id:
+                statement = statement.where(Document.ingest_batch_id == ingest_batch_id)
+            statement = statement.order_by(Document.created_at.desc(), Document.id)
+            result = await session.execute(statement)
+            documents = list(result.scalars().unique().all())
+            break
+        if tag:
+            documents = [document for document in documents if tag in (document.tags or [])]
+        total_matched = len(documents)
+        selected = documents[:limit]
+        return {
+            "documents": [self._document_payload(document) for document in selected],
+            "result_count": len(selected),
+            "total_matched": total_matched,
+        }
+
+    async def get_document_outline(
+        self,
+        arguments: dict[str, Any],
+        *,
+        project_ids: list[str],
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Return the section/page skeleton used to plan close reading."""
+        del session_id
+        document_id = arguments.get("document_id")
+        if not isinstance(document_id, str) or not document_id.strip():
+            raise ToolExecutionError("document_id must be a non-empty string")
+        scoped_projects = self._scope(arguments.get("project_ids"), project_ids)
+        document = None
+        chunks: list[Chunk] = []
+        async for session in self.db_session_factory():
+            document = await self._authorized_document(session, document_id, scoped_projects)
+            if document is None:
+                raise ToolExecutionError("document not found in the caller project scope")
+            chunks = await self._document_chunks(session, document_id)
+            break
+        outline = build_document_outline(document, chunks)
+        return {
+            "document_id": document.id,
+            "filename": document.filename,
+            "title": document.title,
+            "doc_type": document.doc_type,
+            "outline": outline,
+            "result_count": len(outline),
+            "chunk_count": len(chunks),
+        }
+
+    async def read_document_range(
+        self,
+        arguments: dict[str, Any],
+        *,
+        project_ids: list[str],
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Read consecutive chunks in document order (page range or section path)."""
+        del session_id
+        document_id = arguments.get("document_id")
+        if not isinstance(document_id, str) or not document_id.strip():
+            raise ToolExecutionError("document_id must be a non-empty string")
+        page_start = arguments.get("page_start")
+        page_end = arguments.get("page_end")
+        for field, value in (("page_start", page_start), ("page_end", page_end)):
+            if value is not None and (not isinstance(value, int) or value < 1):
+                raise ToolExecutionError(f"{field} must be a positive integer")
+        if page_start is not None and page_end is not None and page_end < page_start:
+            raise ToolExecutionError("page_end must not be smaller than page_start")
+        section_path = arguments.get("section_path")
+        if section_path is not None and (
+            not isinstance(section_path, list)
+            or not section_path
+            or not all(isinstance(item, str) and item.strip() for item in section_path)
+        ):
+            raise ToolExecutionError("section_path must be a non-empty array of strings")
+        max_chars = arguments.get("max_chars", DEFAULT_RANGE_CHARS)
+        if not isinstance(max_chars, int) or not 200 <= max_chars <= MAX_RANGE_CHARS:
+            raise ToolExecutionError(f"max_chars must be between 200 and {MAX_RANGE_CHARS}")
+        start_chunk_index = arguments.get("start_chunk_index", 0)
+        start_char = arguments.get("start_char", 0)
+        for field, value in (("start_chunk_index", start_chunk_index), ("start_char", start_char)):
+            if type(value) is not int or value < 0:
+                raise ToolExecutionError(f"{field} must be a non-negative integer")
+        scoped_projects = self._scope(arguments.get("project_ids"), project_ids)
+
+        document = None
+        chunks: list[Chunk] = []
+        async for session in self.db_session_factory():
+            document = await self._authorized_document(session, document_id, scoped_projects)
+            if document is None:
+                raise ToolExecutionError("document not found in the caller project scope")
+            chunks = await self._document_chunks(session, document_id)
+            break
+        selected, next_cursor = select_document_range(
+            chunks,
+            page_start=page_start,
+            page_end=page_end,
+            section_path=section_path,
+            max_chars=max_chars,
+            start_chunk_index=start_chunk_index,
+            start_char=start_char,
+        )
+        if not selected:
+            raise ToolExecutionError("no document content in the requested range")
+        payload = []
+        for chunk in selected:
+            first_page, last_page = chunk_page_range(chunk)
+            payload.append(
+                {
+                    "chunk_id": chunk.id,
+                    "chunk_index": chunk.chunk_index,
+                    "page_start": first_page,
+                    "page_end": last_page,
+                    "content_type": chunk.content_type,
+                    "locator": source_locator(
+                        document.filename,
+                        document.file_type,
+                        chunk.chunk_metadata,
+                    ),
+                    "content": chunk.content,
+                    "char_start": chunk.char_start,
+                    "char_end": chunk.char_end,
+                },
+            )
+        return {
+            "document_id": document.id,
+            "filename": document.filename,
+            "title": document.title,
+            "chunks": payload,
+            "content": "\n\n".join(chunk.content for chunk in selected),
+            "chunk_count": len(payload),
+            "truncated": next_cursor is not None,
+            "next_cursor": next_cursor,
         }
 
     async def save_memory(

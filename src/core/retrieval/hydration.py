@@ -1,6 +1,8 @@
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.citations import source_locator
 from src.db.models import Chunk, Document, project_document
@@ -10,15 +12,15 @@ from src.db.postgres import get_db
 async def hydrate_search_results(
     results: list[dict[str, Any]],
     project_ids: list[str],
-    db_session_factory=None,
-    session=None,
+    db_session_factory: Callable[[], AsyncIterator[AsyncSession]] | None = None,
+    session: AsyncSession | None = None,
 ) -> list[dict[str, Any]]:
     """Replace vector-index payloads with project-authorized PostgreSQL content."""
     chunk_ids = [result.get("id") for result in results if result.get("id")]
     if not chunk_ids or not project_ids:
         return []
 
-    async def load(active_session):
+    async def load(active_session: AsyncSession) -> dict[str, tuple[Chunk, Document]]:
         rows = await active_session.execute(
             select(Chunk, Document)
             .join(Document, Chunk.document_id == Document.id)
@@ -54,6 +56,11 @@ async def hydrate_search_results(
                 "version_status": chunk.version_status,
                 "filename": document.filename,
                 "source": document.filename,
+                "document_id": document.id,
+                "title": document.title,
+                "doc_type": document.doc_type,
+                "tags": list(document.tags or []),
+                "year": document.year,
                 "locator": source_locator(
                     document.filename,
                     document.file_type,

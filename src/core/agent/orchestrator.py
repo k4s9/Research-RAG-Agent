@@ -1,4 +1,5 @@
 import json
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -230,6 +231,8 @@ class AgentOrchestrator:
                 function = call.get("function", {})
                 name = function.get("name")
                 raw_arguments = function.get("arguments", "{}")
+                arguments: dict[str, Any] = {}
+                duration_ms: int | None = None
                 try:
                     arguments = (
                         json.loads(raw_arguments)
@@ -246,12 +249,14 @@ class AgentOrchestrator:
                     if call_key in seen_calls:
                         raise ToolExecutionError("repeated tool call rejected")
                     seen_calls.add(call_key)
+                    started_at = time.perf_counter()
                     result = await self.tool_registry.execute(
                         str(name),
                         arguments,
                         project_ids=project_ids,
                         session_id=session_id,
                     )
+                    duration_ms = int((time.perf_counter() - started_at) * 1000)
                     error = None
                 except Exception as exc:
                     result = {"error": str(exc)}
@@ -263,6 +268,7 @@ class AgentOrchestrator:
                         "arguments": arguments,
                         "result": result,
                         "error": error,
+                        "duration_ms": duration_ms,
                     },
                 )
                 tool_messages.append(

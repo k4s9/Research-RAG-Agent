@@ -1,4 +1,5 @@
 from src.core.agent.orchestrator import AgentOrchestrator
+from src.core.ingest.enrichment import DocumentEnricher
 from src.core.ingest.pipeline import DocumentIngestPipeline
 from src.core.retrieval.hybrid_search import HybridSearch
 
@@ -13,3 +14,7 @@ def get_searcher() -> HybridSearch:
 
 def get_orchestrator() -> AgentOrchestrator:
     return AgentOrchestrator()
+
+
+def get_document_enricher() -> DocumentEnricher:
+    return DocumentEnricher()

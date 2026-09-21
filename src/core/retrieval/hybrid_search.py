@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 from loguru import logger
@@ -38,12 +39,17 @@ class HybridSearch:
         include_outdated: bool = False,
         content_types: list[str] | None = None,
         time_decay_enabled: bool = False,
+        chunk_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        if chunk_ids == []:
+            return []
         query_embedding = self.embedder.embed([query])[0]
         if not query_embedding:
             raise RuntimeError("embedding service returned an empty query vector")
 
         filters = []
+        if chunk_ids is not None:
+            filters.append(f"id in {json.dumps(chunk_ids, ensure_ascii=False)}")
         if not include_outdated:
             filters.append("version_status == 'active'")
         if project_ids:

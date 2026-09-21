@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model_name: str = "deepseek-chat"
     llm_base_url: str = "https://api.deepseek.com"
+    document_enrichment_timeout_seconds: float = 60.0
 
     # Retrieval
     dense_top_k: int = 50
@@ -42,6 +43,10 @@ class Settings(BaseSettings):
     final_top_k: int = 5
     time_decay_alpha: float = 0.01
     time_decay_lambda: float = 0.3
+
+    # Agent loop
+    agent_max_steps: int = 12
+    context_recent_turns: int = 6
 
     # OCR
     use_ocr: bool = True

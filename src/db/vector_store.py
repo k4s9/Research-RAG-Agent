@@ -1,3 +1,4 @@
+import json
 import math
 import re
 from threading import Lock
@@ -16,14 +17,14 @@ class VectorStore(Protocol):
         self,
         vector: list[float],
         top_k: int = 10,
-        filter: str | None = None,
+        filter: str | None = None,  # noqa: A002 - Milvus-compatible keyword
     ) -> list[dict[str, Any]]: ...
 
     def keyword_search(
         self,
         query: str,
         top_k: int = 10,
-        filter: str | None = None,
+        filter: str | None = None,  # noqa: A002 - Milvus-compatible keyword
     ) -> list[dict[str, Any]]: ...
 
 
@@ -53,6 +54,9 @@ class InMemoryVectorStore:
     def _matches(entity: dict[str, Any], expression: str | None) -> bool:
         if not expression:
             return True
+        id_filter = re.search(r"\bid in (\[[^\n]*?\])", expression)
+        if id_filter and entity.get("id") not in json.loads(id_filter.group(1)):
+            return False
         if "version_status == 'active'" in expression and entity.get("version_status") != "active":
             return False
         project_ids = re.findall(r"ARRAY_CONTAINS\(project_ids, '([^']+)'\)", expression)
@@ -65,7 +69,7 @@ class InMemoryVectorStore:
         self,
         vector: list[float],
         top_k: int = 10,
-        filter: str | None = None,
+        filter: str | None = None,  # noqa: A002 - Milvus-compatible keyword
     ) -> list[dict[str, Any]]:
         if not vector:
             raise ValueError("query vector must not be empty")
@@ -78,7 +82,9 @@ class InMemoryVectorStore:
             candidate = entity["dense_vector"]
             if len(candidate) != len(vector):
                 raise ValueError("query and stored vector dimensions do not match")
-            distance = math.sqrt(sum((left - right) ** 2 for left, right in zip(vector, candidate)))
+            distance = math.sqrt(
+                sum((left - right) ** 2 for left, right in zip(vector, candidate, strict=True)),
+            )
             result = {key: value for key, value in entity.items() if key != "dense_vector"}
             result.update(distance=distance, score=1.0 / (1.0 + distance))
             results.append(result)
@@ -88,7 +94,7 @@ class InMemoryVectorStore:
         self,
         query: str,
         top_k: int = 10,
-        filter: str | None = None,
+        filter: str | None = None,  # noqa: A002 - Milvus-compatible keyword
     ) -> list[dict[str, Any]]:
         with self._lock:
             entities = list(self._entities.values())

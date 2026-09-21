@@ -1,20 +1,24 @@
 import hashlib
 import uuid
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.ingest.cleaner import DocumentCleaner
 from src.core.ingest.markdown_chunker import MarkdownChunker
 from src.core.ingest.markdown_parser import EnhancedMarkdownParser
+from src.core.ingest.metadata import extract_document_metadata
 from src.core.ingest.pdf_chunker import PDFChunker
 from src.core.ingest.pdf_parser import PDFParser
 from src.core.retrieval.embedder import Qwen3Embedder
 from src.db.models import Chunk, Document, Project
 from src.db.postgres import get_db as get_db_session
+from src.db.vector_store import VectorStore
 
 SUPPORTED_FILE_TYPES = {".pdf": "pdf", ".md": "markdown", ".markdown": "markdown"}
 
@@ -31,9 +35,9 @@ class DocumentIngestPipeline:
         markdown_parser: EnhancedMarkdownParser | None = None,
         cleaner: DocumentCleaner | None = None,
         embedder: Qwen3Embedder | None = None,
-        vector_store: Any = None,
-        db_session_factory: Any = None,
-    ):
+        vector_store: VectorStore | None = None,
+        db_session_factory: Callable[[], AsyncIterator[AsyncSession]] | None = None,
+    ) -> None:
         self.pdf_parser = pdf_parser or PDFParser()
         self.markdown_parser = markdown_parser or EnhancedMarkdownParser()
         self.cleaner = cleaner or DocumentCleaner()
@@ -50,7 +54,7 @@ class DocumentIngestPipeline:
             raise ValueError(f"不支持的文件类型: {suffix}")
         return SUPPORTED_FILE_TYPES[suffix]
 
-    def _get_chunker(self, file_type: str):
+    def _get_chunker(self, file_type: str) -> PDFChunker | MarkdownChunker:
         if file_type == "pdf":
             return self.pdf_chunker
         if file_type == "markdown":
@@ -64,6 +68,7 @@ class DocumentIngestPipeline:
         file_type: str,
         content_hash: str,
         project_ids: list[str],
+        ingest_batch_id: str | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
         async for session in self.db_session_factory():
             projects = []
@@ -89,12 +94,15 @@ class DocumentIngestPipeline:
                         "document_id": existing.id,
                         "status": existing.status,
                         "chunk_count": metadata.get("chunk_count", 0),
+                        "title": existing.title,
+                        "doc_type": existing.doc_type,
                         "deduplicated": True,
                     }
                 existing.file_path = file_path
                 existing.filename = Path(file_path).name
                 existing.status = "processing"
                 existing.parse_metadata = {"stage": "parsing"}
+                existing.ingest_batch_id = ingest_batch_id or existing.ingest_batch_id
                 await session.commit()
                 return existing.id, None
             now = datetime.now(timezone.utc)
@@ -107,6 +115,7 @@ class DocumentIngestPipeline:
                     content_hash=content_hash,
                     status="processing",
                     parse_metadata={"stage": "parsing"},
+                    ingest_batch_id=ingest_batch_id,
                     projects=projects,
                     created_at=now,
                     updated_at=now,
@@ -152,12 +161,15 @@ class DocumentIngestPipeline:
         document_id: str,
         chunks: list[dict[str, Any]],
         parse_metadata: dict[str, Any],
+        document_fields: dict[str, Any] | None = None,
     ) -> None:
         async for session in self.db_session_factory():
             document = await session.get(Document, document_id)
             if document is None:
                 raise RuntimeError(f"文档不存在: {document_id}")
             document.parse_metadata = {**parse_metadata, "stage": "indexing"}
+            for key, value in (document_fields or {}).items():
+                setattr(document, key, value)
             now = datetime.now(timezone.utc)
             session.add_all(
                 [
@@ -188,6 +200,7 @@ class DocumentIngestPipeline:
         file_path: str,
         project_ids: list[str],
         description: str | None = None,
+        ingest_batch_id: str | None = None,
     ) -> dict[str, Any]:
         del description
         document_id = str(uuid.uuid4())
@@ -204,6 +217,7 @@ class DocumentIngestPipeline:
             file_type,
             content_hash,
             project_ids,
+            ingest_batch_id,
         )
         if existing is not None:
             return existing
@@ -229,11 +243,15 @@ class DocumentIngestPipeline:
             if not chunks:
                 raise ValueError("文档未生成可索引的文本块")
 
+            document_metadata = extract_document_metadata(
+                parsed_content,
+                Path(file_path).name,
+            )
             await self._set_status(document_id, "processing", "embedding")
             embeddings = self.embedder.embed([chunk["content"] for chunk in chunks])
             if len(embeddings) != len(chunks) or any(not vector for vector in embeddings):
                 raise RuntimeError("Embedding 服务未返回完整的非空向量")
-            for chunk, dense_vector in zip(chunks, embeddings):
+            for chunk, dense_vector in zip(chunks, embeddings, strict=True):
                 chunk["dense_vector"] = dense_vector
 
             parse_metadata = {
@@ -241,8 +259,23 @@ class DocumentIngestPipeline:
                 "section_count": parsed_content.get("total_sections", 0),
                 "block_count": parsed_content.get("total_blocks", 0),
                 "chunk_count": len(chunks),
+                "outline": document_metadata["outline"],
             }
-            await self._persist_chunks(document_id, chunks, parse_metadata)
+            await self._persist_chunks(
+                document_id,
+                chunks,
+                parse_metadata,
+                document_fields={
+                    "title": document_metadata["title"],
+                    "doc_type": document_metadata["doc_type"],
+                    "authors": document_metadata["authors"],
+                    "year": document_metadata["year"],
+                    "venue": document_metadata["venue"],
+                    "page_count": document_metadata["page_count"],
+                    "extra_metadata": document_metadata["extra_metadata"],
+                    "ingest_batch_id": ingest_batch_id,
+                },
+            )
 
             entities = [
                 {
@@ -264,7 +297,13 @@ class DocumentIngestPipeline:
 
             await self._set_status(document_id, "ready", "ready")
             logger.info(f"文档处理完成: {file_path}, 生成 {len(chunks)} 个 chunk")
-            return {"document_id": document_id, "status": "ready", "chunk_count": len(chunks)}
+            return {
+                "document_id": document_id,
+                "status": "ready",
+                "chunk_count": len(chunks),
+                "title": document_metadata["title"],
+                "doc_type": document_metadata["doc_type"],
+            }
         except Exception as exc:
             logger.exception(f"文档处理失败: {exc}")
             if vector_ids:
