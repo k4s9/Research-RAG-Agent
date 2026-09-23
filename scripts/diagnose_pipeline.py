@@ -136,7 +136,7 @@ async def diagnose_pipeline(file_path: str):
 
 
 async def main():
-    test_file = "/home/guozy/research-rag-agent/data/uploads/Omni JARVIS.pdf"
+    test_file = str(Path(__file__).resolve().parents[1] / 'data/uploads/Omni JARVIS.pdf')
 
     if len(sys.argv) > 1:
         test_file = sys.argv[1]

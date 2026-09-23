@@ -314,7 +314,12 @@ async def test_three_turn_chat_keeps_history_and_run_trace(
         assert run_response.status_code == 200, run_response.text
         assert run_response.json()["status"] == "completed"
         assert run_response.json()["goal"] == questions[2]
-        assert run_response.json()["steps"] == []
+        steps = run_response.json()["steps"]
+        assert [step["step_type"] for step in steps] == ["tool_call", "observation"]
+        assert steps[0]["tool_name"] == "search_knowledge"
+        assert steps[0]["arguments"]["query"] == questions[2]
+        assert steps[1]["error"] is None
+        assert steps[1]["result_summary"]
 
         runs = await client.get(f"/api/v1/chat/sessions/{session_id}/runs")
         assert runs.status_code == 200, runs.text

@@ -4,7 +4,7 @@ from pymilvus import DataType, MilvusClient
 from src.config.settings import settings
 from src.core.retrieval.bm25 import BM25Retriever
 
-COLLECTION_NAME = "knowledge_chunks"
+COLLECTION_NAME = settings.milvus_collection
 REQUIRED_FIELDS = {
     "id",
     "entity_type",
@@ -19,7 +19,7 @@ REQUIRED_FIELDS = {
 
 class MilvusClientWrapper:
     def __init__(self):
-        self.client = MilvusClient(uri=settings.milvus_uri)
+        self.client = MilvusClient(uri=settings.milvus_uri, token=settings.milvus_token)
         self.collection_name = COLLECTION_NAME
         self._ensure_collection_exists()
 
@@ -34,6 +34,10 @@ class MilvusClientWrapper:
                 if missing_fields:
                     missing = ", ".join(sorted(missing_fields))
                     raise RuntimeError(f"Milvus collection schema 缺少字段: {missing}")
+                dense = next(field for field in description["fields"] if field["name"] == "dense_vector")
+                dimension = (dense.get("params") or {}).get("dim")
+                if dimension is None or int(dimension) != settings.embedding_dimension:
+                    raise RuntimeError("Milvus dense_vector dimension does not match EMBEDDING_DIMENSION")
                 logger.info(f"Milvus 集合已存在，直接使用: {self.collection_name}")
                 return
 

@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
+import httpx
 from loguru import logger
 
 from src.config.settings import settings
@@ -37,6 +38,30 @@ class LLMClient:
         self.base_url = settings.llm_base_url
         self._prompt_log_enabled = True
         self._current_log_file = None
+
+    @staticmethod
+    def inference_options():
+        """Optional server-supported reasoning control; never silently drop a rejection."""
+        return {"reasoning_effort": settings.llm_reasoning_effort} if settings.llm_reasoning_effort else {}
+
+    async def acomplete(self, messages, *, tools=None, max_tokens=1024, timeout=None):
+        """One cancellable request. The run accounts for attempts; no hidden retry."""
+        if self.provider == "local":
+            return {"message": {"role": "assistant", "content": self._call_local(messages[-1]["content"])}}
+        if self.provider not in {"openai", "deepseek"}:
+            raise ValueError("unsupported LLM provider")
+        payload = {"model": self.model_name, "messages": messages, "temperature": 0,
+                   "max_tokens": max_tokens, **self.inference_options()}
+        if tools:
+            payload.update(tools=tools, tool_choice="auto")
+        request_timeout = min(timeout, settings.llm_timeout_seconds) if timeout is not None else settings.llm_timeout_seconds
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            response = await client.post(f"{self.base_url.rstrip('/')}/chat/completions",
+                json=payload, headers={"Authorization": f"Bearer {self.api_key}"})
+            response.raise_for_status()
+            data = response.json()
+            return {"message": data["choices"][0]["message"], "usage": data.get("usage"),
+                    "finish_reason": data["choices"][0].get("finish_reason")}
 
     def generate(
         self,
@@ -135,12 +160,13 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": 1024,
+            **self.inference_options(),
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
         response = retry_sync(
-            lambda: requests.post(url, json=payload, headers=headers, timeout=30),
+            lambda: requests.post(url, json=payload, headers=headers, timeout=settings.llm_timeout_seconds),
             attempts=settings.request_retry_attempts,
             backoff_seconds=settings.request_retry_backoff_seconds,
         )
@@ -185,10 +211,11 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": 1024,
+            **self.inference_options(),
         }
 
         response = retry_sync(
-            lambda: requests.post(url, json=payload, headers=headers, timeout=30),
+            lambda: requests.post(url, json=payload, headers=headers, timeout=settings.llm_timeout_seconds),
             attempts=settings.request_retry_attempts,
             backoff_seconds=settings.request_retry_backoff_seconds,
         )
@@ -219,10 +246,11 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": 1024,
+            **self.inference_options(),
         }
 
         response = retry_sync(
-            lambda: requests.post(url, json=payload, headers=headers, timeout=30),
+            lambda: requests.post(url, json=payload, headers=headers, timeout=settings.llm_timeout_seconds),
             attempts=settings.request_retry_attempts,
             backoff_seconds=settings.request_retry_backoff_seconds,
         )

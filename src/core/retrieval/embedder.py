@@ -43,7 +43,10 @@ class Qwen3Embedder:
         if self.provider != "remote":
             raise ValueError(f"unsupported embedding provider: {self.provider}")
 
-        url = f"{self.base_url}/{settings.embedding_endpoint.lstrip('/')}"
+        endpoint = settings.embedding_endpoint.lstrip("/")
+        if self.base_url.endswith("/v1") and endpoint.startswith("v1/"):
+            endpoint = endpoint[3:]
+        url = f"{self.base_url}/{endpoint}"
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

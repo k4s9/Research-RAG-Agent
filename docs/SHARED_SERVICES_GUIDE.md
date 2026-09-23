@@ -2,23 +2,24 @@
 
 本文档是新项目和新 session 的复用入口。凭据只从运行环境或本项目 `.env` 读取，
 不要把 key、密码、完整 `DATABASE_URL` 写入代码、日志、issue 或 prompt。
+本文服务域名已脱敏，均为示例；实际连接请使用部署环境中的配置。
 
 ## 服务清单
 
-| 服务 | 默认地址 | 协议/路径 | 必要变量 |
+| 服务 | 脱敏示例地址 | 协议/路径 | 必要变量 |
 |---|---|---|---|
-| LLM | `http://133.133.135.63:8000` | OpenAI 兼容 `/v1/chat/completions` | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
-| Embedding | `http://133.133.135.63:8001/v1` | OpenAI 兼容 `/embeddings` | `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY` |
-| Reranker | `http://133.133.135.62:8001/v1` | `/rerank`（`/v1/rerank` 也可用） | `RERANKER_BASE_URL`, `RERANKER_MODEL`, `RERANKER_API_KEY` |
-| PostgreSQL | `postgresql://133.133.135.64:5432/<db>` | PostgreSQL wire protocol | `DATABASE_URL`，以及拆分变量 |
+| LLM | `http://llm.example.com:8000` | OpenAI 兼容 `/v1/chat/completions` | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
+| Embedding | `http://llm.example.com:8001/v1` | OpenAI 兼容 `/embeddings` | `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY` |
+| Reranker | `http://reranker.example.com:8001/v1` | `/rerank`（`/v1/rerank` 也可用） | `RERANKER_BASE_URL`, `RERANKER_MODEL`, `RERANKER_API_KEY` |
+| PostgreSQL | `postgresql://db.example.com:5432/<db>` | PostgreSQL wire protocol | `DATABASE_URL`，以及拆分变量 |
 
 当前 `.env` 已有 LLM 的 base URL，以及三项服务的 key；建议补充以下非秘密变量，
 使新项目不必猜测端口、路径和模型名：
 
 ```dotenv
-EMBEDDING_BASE_URL=http://133.133.135.63:8001/v1
+EMBEDDING_BASE_URL=http://llm.example.com:8001/v1
 EMBEDDING_MODEL=Qwen3-Embedding-4B
-RERANKER_BASE_URL=http://133.133.135.62:8001/v1
+RERANKER_BASE_URL=http://reranker.example.com:8001/v1
 RERANKER_MODEL=Qwen/Qwen3-Reranker-4B
 ```
 
@@ -54,7 +55,10 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
 import os
 from openai import OpenAI
 
-llm = OpenAI(base_url=os.environ["LLM_BASE_URL"].rstrip("/") + "/v1",
+llm_base_url = os.environ["LLM_BASE_URL"].rstrip("/")
+if not llm_base_url.endswith("/v1"):
+    llm_base_url += "/v1"
+llm = OpenAI(base_url=llm_base_url,
              api_key=os.environ["LLM_API_KEY"])
 answer = llm.chat.completions.create(
     model=os.environ["LLM_MODEL"],
@@ -94,3 +98,15 @@ Reranker 使用 JSON POST：`{"model": RERANKER_MODEL, "query": "...", "document
 3. Reranker 的 `max_model_len=1024` 是输入约束，documents 过长时先截断或分块。
 4. 所有服务失败都应显式标记为 unavailable/unknown，不能解释成“没有相关记忆”。
 5. 日志只记录 URL 的 host/path、状态码、耗时和 hash；Authorization、密码和完整 DSN 必须脱敏。
+
+## 本项目复测（2026-09-21）
+
+已在沙箱外清除代理后重新验证：LLM、Embedding、Reranker 均返回 200，
+Embedding 为 2560 维，PostgreSQL 为 16.14；模型 `/models` 与数据库只读连接的
+1/2/4/8 并发均通过。默认 Milvus `localhost:19530` 拒绝连接。
+
+服务可用不等于应用已适配：当前共享 `.env` 与应用字段名存在差异，真实上传还暴露出
+PostgreSQL 时间类型错误，检索层会丢失 `relevance_score`，摘要输出也存在波动。详见
+[`live_service_test_report_20260921.md`](live_service_test_report_20260921.md)。
+可通过 `scripts/run_shared_service_tests.py --suite all` 在源码副本和临时数据库 schema 中复现；
+该测试明确使用内存向量索引，不代表 Milvus 端到端验证。

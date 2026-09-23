@@ -57,6 +57,7 @@ async def hydrate_search_results(
                 "filename": document.filename,
                 "source": document.filename,
                 "document_id": document.id,
+                "document_hash": document.content_hash,
                 "title": document.title,
                 "doc_type": document.doc_type,
                 "tags": list(document.tags or []),

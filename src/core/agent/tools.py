@@ -8,12 +8,14 @@ being returned to the model.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
 
+from src.config.settings import settings
 from src.core.citations import source_locator
 from src.core.document_view import (
     DEFAULT_RANGE_CHARS,
@@ -266,9 +268,12 @@ class ResearchToolRegistry:
         if not isinstance(query, str) or not query.strip():
             raise ToolExecutionError("query must be a non-empty string")
         scoped_projects = self._scope(arguments.get("project_ids"), project_ids)
-        top_k = arguments.get("top_k", 5)
-        if not isinstance(top_k, int) or not 1 <= top_k <= 20:
+        requested_top_k = arguments.get("top_k", settings.agent_search_top_k)
+        if type(requested_top_k) is not int or not 1 <= requested_top_k <= 20:
             raise ToolExecutionError("top_k must be between 1 and 20")
+        top_k = min(requested_top_k, settings.agent_search_top_k)
+        if "include_outdated" in arguments and type(arguments["include_outdated"]) is not bool:
+            raise ToolExecutionError("include_outdated must be boolean")
         content_types = arguments.get("content_types")
         if content_types is not None and (
             not isinstance(content_types, list)
@@ -284,7 +289,7 @@ class ResearchToolRegistry:
             filters["chunk_ids"] = await self._matching_chunk_ids(scoped_projects, doc_types, tags)
             if not filters["chunk_ids"]:
                 return {"query": query, "results": [], "result_count": 0, "retrieval_degraded": []}
-        results = self.searcher.search(
+        results = await asyncio.to_thread(self.searcher.search,
             query=query.strip(),
             project_ids=scoped_projects,
             top_k=top_k,
@@ -299,9 +304,10 @@ class ResearchToolRegistry:
         if tags:
             hydrated = [item for item in hydrated if set(tags).intersection(item.get("tags") or [])]
         hydrated = hydrated[:top_k]
-        hydrated = [{**item, "source_id": f"S{index + 1}"} for index, item in enumerate(hydrated)]
         return {
             "query": query,
+            "requested_top_k": requested_top_k,
+            "effective_top_k": top_k,
             "results": hydrated,
             "result_count": len(hydrated),
             "retrieval_degraded": sorted(
@@ -360,7 +366,7 @@ class ResearchToolRegistry:
             raise ToolExecutionError("document_id must be a non-empty string")
         if chunk_id is None and document_id is None:
             raise ToolExecutionError("chunk_id or document_id is required")
-        if page_start is not None and (not isinstance(page_start, int) or page_start < 1):
+        if page_start is not None and (type(page_start) is not int or page_start < 1):
             raise ToolExecutionError("page_start must be a positive integer")
         if section_path is not None and (
             not isinstance(section_path, list)
@@ -403,6 +409,8 @@ class ResearchToolRegistry:
         chunk, document = record
         return {
             "chunk_id": chunk.id,
+            "document_id": document.id,
+            "document_hash": document.content_hash,
             "content": chunk.content,
             "content_type": chunk.content_type,
             "filename": document.filename,
@@ -467,7 +475,7 @@ class ResearchToolRegistry:
         if tag is not None and (not isinstance(tag, str) or not tag.strip()):
             raise ToolExecutionError("tag must be a non-empty string")
         year = arguments.get("year")
-        if year is not None and (not isinstance(year, int) or not 1900 <= year <= 2100):
+        if year is not None and (type(year) is not int or not 1900 <= year <= 2100):
             raise ToolExecutionError("year must be between 1900 and 2100")
         ingest_batch_id = arguments.get("ingest_batch_id")
         if ingest_batch_id is not None and (
@@ -475,7 +483,7 @@ class ResearchToolRegistry:
         ):
             raise ToolExecutionError("ingest_batch_id must be a non-empty string")
         limit = arguments.get("limit", 20)
-        if not isinstance(limit, int) or not 1 <= limit <= 50:
+        if type(limit) is not int or not 1 <= limit <= 50:
             raise ToolExecutionError("limit must be between 1 and 50")
 
         documents: list[Document] = []
@@ -550,7 +558,7 @@ class ResearchToolRegistry:
         page_start = arguments.get("page_start")
         page_end = arguments.get("page_end")
         for field, value in (("page_start", page_start), ("page_end", page_end)):
-            if value is not None and (not isinstance(value, int) or value < 1):
+            if value is not None and (type(value) is not int or value < 1):
                 raise ToolExecutionError(f"{field} must be a positive integer")
         if page_start is not None and page_end is not None and page_end < page_start:
             raise ToolExecutionError("page_end must not be smaller than page_start")
@@ -562,7 +570,7 @@ class ResearchToolRegistry:
         ):
             raise ToolExecutionError("section_path must be a non-empty array of strings")
         max_chars = arguments.get("max_chars", DEFAULT_RANGE_CHARS)
-        if not isinstance(max_chars, int) or not 200 <= max_chars <= MAX_RANGE_CHARS:
+        if type(max_chars) is not int or not 200 <= max_chars <= MAX_RANGE_CHARS:
             raise ToolExecutionError(f"max_chars must be between 200 and {MAX_RANGE_CHARS}")
         start_chunk_index = arguments.get("start_chunk_index", 0)
         start_char = arguments.get("start_char", 0)
@@ -615,6 +623,7 @@ class ResearchToolRegistry:
             "filename": document.filename,
             "title": document.title,
             "chunks": payload,
+            "document_hash": document.content_hash,
             "content": "\n\n".join(chunk.content for chunk in selected),
             "chunk_count": len(payload),
             "truncated": next_cursor is not None,

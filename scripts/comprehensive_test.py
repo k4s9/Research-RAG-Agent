@@ -305,12 +305,12 @@ async def main():
     tester = ComprehensiveTester()
 
     pdf_files = [
-        "/home/guozy/research-rag-agent/data/uploads/pi0.pdf",
-        "/home/guozy/research-rag-agent/data/uploads/Omni JARVIS.pdf",
-        "/home/guozy/research-rag-agent/data/uploads/OpenHA.pdf"
+        str(Path(__file__).resolve().parents[1] / 'data/uploads/pi0.pdf'),
+        str(Path(__file__).resolve().parents[1] / 'data/uploads/Omni JARVIS.pdf'),
+        str(Path(__file__).resolve().parents[1] / 'data/uploads/OpenHA.pdf')
     ]
 
-    md_file = "/home/guozy/research-rag-agent/working_document.md"
+    md_file = str(Path(__file__).resolve().parents[1] / 'working_document.md')
 
     pdf_results = []
     md_results = []

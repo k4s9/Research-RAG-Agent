@@ -488,7 +488,8 @@ async def test_search_knowledge_filters_by_doc_type_and_tag(sessions: sessionmak
     )
     assert [item["id"] for item in papers["results"]] == ["paper-c0", "paper-c1"]
     assert {item["doc_type"] for item in papers["results"]} == {"paper"}
-    assert [item["source_id"] for item in papers["results"]] == ["S1", "S2"]
+    # IDs belong to the run registry; raw tools must never restart numbering.
+    assert all("source_id" not in item for item in papers["results"])
     # Scope must be applied before Top-K, not patched by overfetching.
     assert searcher.calls[-1]["top_k"] == 2
     assert set(searcher.calls[-1]["chunk_ids"]) == {f"paper-c{i}" for i in range(4)}

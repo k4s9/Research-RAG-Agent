@@ -16,7 +16,7 @@ from src.core.ingest.metadata import extract_document_metadata
 from src.core.ingest.pdf_chunker import PDFChunker
 from src.core.ingest.pdf_parser import PDFParser
 from src.core.retrieval.embedder import Qwen3Embedder
-from src.db.models import Chunk, Document, Project
+from src.db.models import Chunk, Document, Project, utc_now
 from src.db.postgres import get_db as get_db_session
 from src.db.vector_store import VectorStore
 
@@ -105,7 +105,7 @@ class DocumentIngestPipeline:
                 existing.ingest_batch_id = ingest_batch_id or existing.ingest_batch_id
                 await session.commit()
                 return existing.id, None
-            now = datetime.now(timezone.utc)
+            now = utc_now()
             session.add(
                 Document(
                     id=document_id,
@@ -152,7 +152,7 @@ class DocumentIngestPipeline:
                 metadata.pop("error", None)
             document.status = status
             document.parse_metadata = metadata
-            document.updated_at = datetime.now(timezone.utc)
+            document.updated_at = utc_now()
             await session.commit()
             break
 
@@ -170,7 +170,7 @@ class DocumentIngestPipeline:
             document.parse_metadata = {**parse_metadata, "stage": "indexing"}
             for key, value in (document_fields or {}).items():
                 setattr(document, key, value)
-            now = datetime.now(timezone.utc)
+            now = utc_now()
             session.add_all(
                 [
                     Chunk(

@@ -5,6 +5,7 @@ RUN_SHARED_SERVICES_E2E=1. Only a randomly named PostgreSQL schema is modified;
 it is dropped in fixture teardown, including after an assertion failure.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -29,7 +30,7 @@ from src.api.dependencies import (
 from src.config.settings import settings
 from src.core.agent.orchestrator import AgentOrchestrator
 from src.core.agent.tools import ResearchToolRegistry
-from src.core.ingest.enrichment import DocumentEnricher
+from src.core.ingest.enrichment import DocumentEnricher, parse_enrichment_payload
 from src.core.ingest.pipeline import DocumentIngestPipeline
 from src.core.retrieval.embedder import Qwen3Embedder
 from src.core.retrieval.hybrid_search import HybridSearch
@@ -39,6 +40,7 @@ from src.db.models import Base, Chunk, Document, Project
 from src.db.postgres import get_db
 from src.db.vector_store import InMemoryVectorStore
 from src.main import app
+from src.utils.async_llm_client import AsyncLLMClient
 
 pytestmark = [
     pytest.mark.integration,
@@ -63,6 +65,29 @@ async def shared_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
     )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     old_overrides = dict(app.dependency_overrides)
+    enrichment_responses = []
+
+    async def record_enrichment_response(response: httpx.Response) -> None:
+        await response.aread()
+        payload = response.json()
+        choice = (payload.get("choices") or [{}])[0]
+        content = choice.get("message", {}).get("content") or ""
+        enrichment_responses.append(
+            {
+                "status": response.status_code,
+                "finish_reason": choice.get("finish_reason"),
+                "completion_tokens": payload.get("usage", {}).get("completion_tokens"),
+                "content_chars": len(content),
+                "has_think_tag": "<think>" in content,
+                "valid_enrichment": parse_enrichment_payload(content) is not None,
+                "response_sha256": hashlib.sha256(response.content).hexdigest(),
+            },
+        )
+
+    llm_http = httpx.AsyncClient(
+        timeout=30,
+        event_hooks={"response": [record_enrichment_response]},
+    )
     created = False
     try:
         async with engine.begin() as connection:
@@ -86,7 +111,10 @@ async def shared_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
             vector_store=vectors,
             db_session_factory=database,
         )
-        enricher = DocumentEnricher(db_session_factory=database)
+        enricher = DocumentEnricher(
+            llm_client=AsyncLLMClient(http_client=llm_http),
+            db_session_factory=database,
+        )
 
         def orchestrator() -> AgentOrchestrator:
             # A fresh agent for every request must reload history from PostgreSQL.
@@ -109,6 +137,7 @@ async def shared_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
             embedder=embedder,
             vectors=vectors,
             enricher=enricher,
+            enrichment_responses=enrichment_responses,
         )
     finally:
         app.dependency_overrides.clear()
@@ -126,6 +155,7 @@ async def shared_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
                         == 0
                     )
         finally:
+            await llm_http.aclose()
             await engine.dispose()
 
 
@@ -250,6 +280,11 @@ async def test_shared_registry_search_and_multi_turn_chat(
         enriched = sum(bool(row["summary"] and row["tags"]) for row in rows)
         print(
             json.dumps(
+                {"probe": "enrichment_responses", "responses": shared_stack.enrichment_responses},
+            ),
+        )
+        print(
+            json.dumps(
                 {"probe": "documents", "ingestion": ingestion, "ready": 4, "enriched": enriched},
             ),
         )
@@ -287,10 +322,12 @@ async def test_shared_registry_search_and_multi_turn_chat(
 
         session_id = str(uuid4())
         run_ids = []
+        quality_issues = []
         for question in (
             "What is the calibration code of Alpha protocol? Search the project and cite [S1].",
             "Repeat that code and identify its protocol "
-            "using the previous conversation and evidence.",
+            "using the previous conversation. "
+            "Search the project again and include a [S1] citation.",
             "Use list_documents to list every uploaded filename in this project.",
         ):
             chat = await client.post(
@@ -303,10 +340,13 @@ async def test_shared_registry_search_and_multi_turn_chat(
             assert answer["response"].strip()
             assert answer["invalid_citation_ids"] == []
             if len(run_ids) < 2:
-                assert "ALPHA-731" in answer["response"]
-                assert answer["citations"]
+                if "ALPHA-731" not in answer["response"]:
+                    quality_issues.append(f"turn {len(run_ids) + 1}: missing calibration code")
+                if not answer["citations"]:
+                    quality_issues.append(f"turn {len(run_ids) + 1}: missing requested citation")
             else:
-                assert all(filename in answer["response"] for filename in documents)
+                if not all(filename in answer["response"] for filename in documents):
+                    quality_issues.append("turn 3: incomplete document inventory")
             run_ids.append(answer["run_id"])
             trace = await client.get(f"/api/v1/chat/runs/{answer['run_id']}")
             assert trace.status_code == 200
@@ -330,7 +370,9 @@ async def test_shared_registry_search_and_multi_turn_chat(
         runs = await client.get(f"/api/v1/chat/sessions/{session_id}/runs")
         assert runs.status_code == 200
         assert runs.json()["total"] == 3
-        assert enriched == 4, "all four synthetic documents should receive real LLM metadata"
+        if enriched != 4:
+            quality_issues.append(f"only {enriched}/4 documents received LLM metadata")
+        assert quality_issues == []
 
 
 def test_shared_reranker_score_contract() -> None:

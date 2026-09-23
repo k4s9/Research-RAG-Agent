@@ -135,6 +135,7 @@ class ChatSession(Base):
     title = Column(String(255), nullable=False, default="新会话")
     project_ids = Column(JSON, nullable=False, default=list)
     status = Column(String(20), nullable=False, default="active")  # active/archived
+    active_run_id = Column(String(36), nullable=True)
     rolling_summary = Column(Text, nullable=True)
     summary_upto_turn = Column(Integer, nullable=False, default=0)
     last_active_at = Column(DateTime, nullable=True, index=True)
@@ -161,6 +162,20 @@ class AgentRun(Base):
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utc_now)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class ReportArtifact(Base):
+    __tablename__ = "report_artifact"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String(36), ForeignKey("agent_run.id"), nullable=False, unique=True)
+    session_id = Column(String(36), ForeignKey("chat_session.id"), nullable=False, index=True)
+    parent_report_id = Column(String(36), ForeignKey("report_artifact.id"), nullable=True)
+    title = Column(String(255), nullable=False)
+    markdown = Column(Text, nullable=False)
+    structured = Column(JSON, nullable=False)
+    evidence = Column(JSON, nullable=False)
+    project_ids = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=utc_now)
 
 
 class AgentStep(Base):

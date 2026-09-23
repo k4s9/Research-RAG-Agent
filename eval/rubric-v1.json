@@ -1,0 +1,29 @@
+{
+  "version": "research-rag-rubric-v1",
+  "status": "candidate_until_manifest_frozen",
+  "task_success": "All required facts, constraints, deliverable fields and supported citation requirements pass; failure/timeout is unsuccessful.",
+  "manual_review_required": true,
+  "dimensions": {
+    "required_conditions_passed": "Integer count of satisfied task-specific requirements; report denominator.",
+    "checkable_claims": "All externally checkable generated factual claims, including recommendation premises.",
+    "supported_claims": "Original text supports the claim under the same conditions, not merely related to it.",
+    "claims_requiring_citations": "Claims the task requires to be sourced.",
+    "supported_cited_claims": "Required claims with a source that supports the claim.",
+    "key_facts_covered": "Gold key facts correctly covered; omission does not improve task success.",
+    "no_answer_correct": "For unanswerable tasks: missing evidence explicitly stated without invented facts.",
+    "false_refusal": "For answerable tasks: incorrectly refuses despite available evidence.",
+    "claim_verdicts": "Pairs of gold and predicted supported/contradicted/insufficient labels. Missing is insufficient only if explicitly stated."
+  },
+  "procedure": "Blind system labels for reviewers; inspect original source snapshots. Review all disputes and at least 20% of other samples. Model self-rating is not a correctness measure.",
+  "candidate_thresholds": {
+    "task_success_rate": 0.8,
+    "fact_support_rate": 0.95,
+    "citation_coverage_rate": 0.9,
+    "no_answer_correct_rate": 0.9,
+    "false_refusal_rate_max": 0.1,
+    "source_mapping_errors": 0,
+    "cross_document_improvement_pp_target": 10,
+    "simple_qa_p95_ratio_target": 1.3,
+    "mean_cost_ratio_target": 2
+  }
+}

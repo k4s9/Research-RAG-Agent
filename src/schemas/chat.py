@@ -1,13 +1,20 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from src.core.agent.runtime import RunBudget
 
 
 class ChatMessageRequest(BaseModel):
     session_id: str
     project_ids: list[str]
-    message: str
+    message: str = Field(min_length=1, max_length=20000)
     include_outdated: bool = False
+    strategy: Literal["auto", "b0", "b1", "b2"] = "auto"
+    task_type: Literal["qa", "compare", "verify", "revise"] = "qa"
+    document_ids: list[str] = Field(default_factory=list, max_length=20)
+    parent_report_id: str | None = None
+    budget: RunBudget | None = None
 
 
 class ExtractedMemory(BaseModel):
@@ -36,6 +43,14 @@ class ChatMessageResponse(BaseModel):
     tool_trace: list[dict[str, Any]] = Field(default_factory=list)
     run_id: str | None = None
     run_status: str | None = None
+    termination_reason: str | None = None
+    usage: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    report_id: str | None = None
+
+
+class ResumeRequest(BaseModel):
+    message: str | None = Field(default=None, max_length=20000)
 
 
 class ChatMessageItem(BaseModel):

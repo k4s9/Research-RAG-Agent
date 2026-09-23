@@ -12,7 +12,7 @@ from src.core.ingest.cleaner import DocumentCleaner
 
 
 async def diagnose():
-    file_path = "/home/guozy/research-rag-agent/data/uploads/Omni JARVIS.pdf"
+    file_path = str(Path(__file__).resolve().parents[1] / 'data/uploads/Omni JARVIS.pdf')
 
     parser = PDFParser()
     cleaner = DocumentCleaner()

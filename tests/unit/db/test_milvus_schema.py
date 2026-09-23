@@ -1,6 +1,7 @@
 import pytest
 
 from src.db.milvus_client import MilvusClientWrapper, REQUIRED_FIELDS
+from src.config.settings import settings
 
 pytestmark = pytest.mark.unit
 
@@ -13,7 +14,8 @@ class FakeMilvusClient:
         return True
 
     def describe_collection(self, collection_name: str) -> dict:
-        return {"fields": [{"name": field} for field in self.fields]}
+        return {"fields": [{"name": field, "params": {"dim": settings.embedding_dimension}}
+                           for field in self.fields]}
 
 
 def wrapper_with_client(client: FakeMilvusClient) -> MilvusClientWrapper:
@@ -34,3 +36,11 @@ def test_existing_milvus_collection_accepts_authoritative_schema() -> None:
     wrapper = wrapper_with_client(FakeMilvusClient(REQUIRED_FIELDS))
 
     wrapper.ensure_collection()
+
+
+def test_existing_milvus_collection_rejects_wrong_dimension() -> None:
+    client = FakeMilvusClient(REQUIRED_FIELDS)
+    client.describe_collection = lambda **kwargs: {"fields": [
+        {"name": field, "params": {"dim": settings.embedding_dimension + 1}} for field in REQUIRED_FIELDS]}
+    with pytest.raises(RuntimeError, match="dimension"):
+        wrapper_with_client(client).ensure_collection()

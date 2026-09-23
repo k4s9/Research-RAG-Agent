@@ -761,7 +761,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # Database
-    postgres_url: str = "postgresql+asyncpg://user:pass@localhost:5432/rag_db"
+    postgres_url: str = "postgresql+asyncpg://raguser:changeme@localhost:5432/rag_db/rag_db"
     milvus_uri: str = "http://localhost:19530"
 
     # Models
@@ -985,7 +985,7 @@ MILVUS_URI=http://localhost:19530
 
 # === LLM API ===
 LLM_PROVIDER=deepseek
-LLM_API_KEY=sk-your-deepseek-api-key
+LLM_API_KEY=replace-me
 LLM_MODEL_NAME=deepseek-chat
 LLM_BASE_URL=https://api.deepseek.com
 

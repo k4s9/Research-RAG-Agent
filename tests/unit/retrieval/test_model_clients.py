@@ -67,3 +67,32 @@ def test_local_model_adapters_are_deterministic() -> None:
         top_k=1,
     )
     assert results[0]["index"] == 1
+
+
+def test_remote_reranker_top_n_and_relevance_score(monkeypatch):
+    captured = {}
+    result = [{"index": 1, "relevance_score": 0.97}]
+
+    def post(url, **kwargs):
+        captured.update(kwargs["json"])
+        return FakeResponse({"results": result})
+
+    monkeypatch.setattr("src.core.retrieval.reranker.requests.post", post)
+    assert Qwen3Reranker(provider="remote").rerank("q", ["a", "b"], 1) == result
+    assert captured["top_n"] == 1
+    assert "top_k" not in captured
+
+
+@pytest.mark.parametrize("rows", [
+    [{"index": 0}],
+    [{"index": 0, "score": float("nan")}],
+    [{"index": 0, "score": 0.8}, {"index": 0, "score": 0.7}],
+    [],
+])
+def test_remote_reranker_rejects_unusable_results(monkeypatch, rows):
+    monkeypatch.setattr(
+        "src.core.retrieval.reranker.requests.post",
+        lambda *a, **k: FakeResponse({"results": rows}),
+    )
+    with pytest.raises(RuntimeError):
+        Qwen3Reranker(provider="remote").rerank("q", ["a", "b"], 1)

@@ -35,7 +35,7 @@ if check_port 8002; then
     echo "后端 API 服务端口 8002 已被占用，跳过启动"
 else
     echo "启动后端 API 服务..."
-    nohup /home/guozy/miniconda3/envs/research_rag/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 8002 > backend.log 2>&1 &
+    nohup "${RESEARCH_RAG_PYTHON:-$HOME/miniconda3/envs/research_rag/bin/python}" -m uvicorn src.main:app --host 0.0.0.0 --port 8002 > backend.log 2>&1 &
     echo "后端 API 服务已启动，运行在 http://0.0.0.0:8002"
     # 等待后端服务启动
     echo "等待后端服务启动..."

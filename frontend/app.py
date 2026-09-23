@@ -1,161 +1,259 @@
-import gradio as gr
-import requests
+"""Single-user research workspace. Task state and artifacts come from the API."""
+
 import json
 import mimetypes
+import tempfile
 import uuid
+from pathlib import Path
+
+import gradio as gr
+import requests
+
 from src.config.settings import settings
 
-# API 基础 URL
-API_BASE_URL = settings.api_client_url.rstrip("/")
+API = settings.api_client_url.rstrip("/") + "/api/v1"
+TASK_TYPES = {"材料问答": "qa", "跨文档比较": "compare", "结论核查": "verify", "修订报告": "revise"}
+STATUS_NAMES = {
+    "running": "执行中",
+    "waiting_user": "等待澄清",
+    "completed": "已完成",
+    "insufficient_evidence": "证据不足",
+    "failed": "执行失败",
+    "cancelled": "已取消",
+    "budget_exceeded": "预算耗尽",
+}
 
-# 生成会话 ID
-session_id = str(uuid.uuid4())
 
-def upload_file(file, project_ids, description):
-    """上传文件"""
-    if not file:
-        return "请选择文件"
-    
-    # 构建项目 ID 列表
-    project_ids_list = [pid.strip() for pid in project_ids.split(',') if pid.strip()]
-    
-    try:
-        # 提取文件名
-        import os
-        filename = os.path.basename(file)
-        # 构建文件对象
-        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        files = {"file": (filename, open(file, "rb"), mime_type)}
-        data = {
-            "project_ids": json.dumps(project_ids_list),
-            "description": description
-        }
-        
-        response = requests.post(
-            f"{API_BASE_URL}/api/v1/documents/upload",
-            files=files,
-            data=data
+def api(method, path, **kwargs):
+    response = requests.request(method, API + path, timeout=40, **kwargs)
+    if not response.ok:
+        raise gr.Error(response.text[:1000])
+    return response.json()
+
+
+def refresh_choices():
+    sessions = api("GET", "/chat/sessions")["sessions"]
+    projects = api("GET", "/projects")["projects"]
+    return (
+        gr.update(choices=[(s["title"], s["session_id"]) for s in sessions]),
+        gr.update(choices=[(p["name"], p["id"]) for p in projects]),
+    )
+
+
+def load_session(session_id):
+    if not session_id:
+        return [], gr.update(choices=[], value=None)
+    session = api("GET", f"/chat/sessions/{session_id}")
+    runs = api("GET", f"/chat/sessions/{session_id}/runs")["runs"]
+    return (
+        [{"role": m["role"], "content": m["content"]} for m in session["messages"]],
+        gr.update(
+            choices=[
+                (f"{STATUS_NAMES.get(r['status'], r['status'])} · {r['goal'][:50]}", r["run_id"])
+                for r in runs
+            ],
+            value=runs[0]["run_id"] if runs else None,
+        ),
+    )
+
+
+def create_session(projects):
+    result = api("POST", "/chat/sessions", json={"project_ids": projects or []})
+    sessions, _ = refresh_choices()
+    sessions["value"] = result["session_id"]
+    return sessions
+
+
+def load_documents(projects):
+    documents = {}
+    for project in projects or []:
+        offset = 0
+        while True:
+            page = api(
+                "GET", "/documents", params={"project_id": project, "limit": 100, "offset": offset}
+            )
+            documents.update({d["id"]: d for d in page["documents"]})
+            offset += len(page["documents"])
+            if offset >= page["total"] or not page["documents"]:
+                break
+    return gr.update(
+        choices=[
+            (f"{d.get('title') or d['filename']} · {d['filename']}", d["id"])
+            for d in documents.values()
+            if d["status"] == "ready"
+        ],
+        value=[],
+    )
+
+
+def submit(message, session_id, projects, documents, kind, parent_id):
+    if not message.strip() or not projects:
+        raise gr.Error("请选择项目并输入任务。")
+    session_id = session_id or str(uuid.uuid4())
+    result = api(
+        "POST",
+        "/chat/runs",
+        json={
+            "session_id": session_id,
+            "project_ids": projects,
+            "message": message,
+            "document_ids": documents or [],
+            "task_type": TASK_TYPES[kind],
+            "strategy": "b2",
+            "parent_report_id": parent_id.strip() or None,
+        },
+    )
+    choices, _ = refresh_choices()
+    choices["value"] = session_id
+    return result["run_id"], choices, "任务已提交。"
+
+
+def refresh_run(run_id):
+    if not run_id:
+        return "选择或提交任务。", [], {}, "", "", None
+    run = api("GET", f"/chat/runs/{run_id}")
+    state = run.get("state") or {}
+    execution = state.get("execution") or {}
+    usage = execution.get("usage") or {}
+    status = STATUS_NAMES.get(run["status"], run["status"])
+    description = f"**{status}** · 模型请求 {usage.get('model_calls', 0)} · 工具尝试 {usage.get('tool_calls', 0)} · 活跃用时 {usage.get('active_seconds', 0):.1f} 秒"
+    if run.get("error"):
+        description += "\n\n" + run["error"]
+    if execution.get("answer") and run["status"] == "waiting_user":
+        description += "\n\n" + execution["answer"]
+    steps = [
+        [
+            t.get("step"),
+            t.get("tool"),
+            t.get("status"),
+            t.get("duration_ms"),
+            t.get("error") or ("复用已有结果" if t.get("cached") else "已保存原始结果"),
+        ]
+        for t in execution.get("trace", [])
+    ]
+    evidence = execution.get("evidence", {})
+    report_id = state.get("report_id") or ""
+    markdown = execution.get("answer", "")
+    download = None
+    if report_id:
+        report = api("GET", f"/chat/reports/{report_id}")
+        markdown = report["markdown"]
+        path = Path(tempfile.gettempdir()) / f"research-report-{report_id}.md"
+        path.write_text(markdown, encoding="utf-8")
+        download = str(path)
+    return description, steps, evidence, markdown, report_id, download
+
+
+def show_source(sources, source_id):
+    source = sources.get(source_id.strip().strip("[]")) if source_id else None
+    if not source:
+        return "输入报告中的来源编号（例如 S1）以查看原文快照。"
+    return f"**{source['filename']}** · {source['locator']}\n\n{source['content']}"
+
+
+def recover(run_id, reply):
+    api("POST", f"/chat/runs/{run_id}/resume", json={"message": reply.strip() or None})
+    return "恢复请求已提交。"
+
+
+def cancel(run_id):
+    result = api("POST", f"/chat/runs/{run_id}/cancel")
+    return STATUS_NAMES.get(result["status"], result["status"])
+
+
+def upload(file, projects):
+    if not file or not projects:
+        raise gr.Error("请选择项目和 PDF/Markdown 文件。")
+    path = Path(file)
+    with path.open("rb") as stream:
+        result = api(
+            "POST",
+            "/documents/upload",
+            files={
+                "file": (
+                    path.name,
+                    stream,
+                    mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                )
+            },
+            data={"project_ids": json.dumps(projects)},
         )
-        response.raise_for_status()
-        result = response.json()
-        return f"上传成功！文档ID: {result.get('document_id')}\n状态: {result.get('status')}\n{result.get('message')}"
-    except Exception as e:
-        return f"上传失败: {str(e)}"
+    return f"{path.name}：{result['status']}"
 
-def send_message(message, project_ids, include_outdated, history):
-    """发送对话消息"""
-    if not message:
-        return "", history
-    
-    # 构建项目 ID 列表
-    project_ids_list = [pid.strip() for pid in project_ids.split(',') if pid.strip()]
-    
-    data = {
-        "session_id": session_id,
-        "project_ids": project_ids_list,
-        "message": message,
-        "include_outdated": include_outdated
-    }
-    
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/api/v1/chat/message",
-            json=data
+
+def create_project(name):
+    if not name.strip():
+        raise gr.Error("请输入项目名称。")
+    api("POST", "/projects", json={"name": name.strip(), "description": ""})
+    return refresh_choices()[1]
+
+
+with gr.Blocks(title="科研材料比较与证据核查") as demo:
+    gr.Markdown(
+        "# 科研材料比较与证据核查\n选择项目与材料，提出比较或核查任务。报告保留来源快照，可继续澄清和修订。"
+    )
+    with gr.Row():
+        sessions = gr.Dropdown(label="会话", choices=[])
+        projects = gr.Dropdown(label="项目", choices=[], multiselect=True)
+        refresh = gr.Button("刷新列表")
+        new_session = gr.Button("新建会话")
+    documents = gr.CheckboxGroup(label="本次材料（不选则由任务发现）", choices=[])
+    with gr.Tab("任务与报告"):
+        kind = gr.Radio(list(TASK_TYPES), label="任务类型", value="跨文档比较")
+        message = gr.Textbox(
+            label="任务要求",
+            lines=3,
+            placeholder="比较所选材料的方法、实验设置与局限，判断哪种适合 8GB 显存；每项结论给出处。",
         )
-        response.raise_for_status()
-        result = response.json()
-        response_text = result.get('response', '无响应')
-        # Gradio Chatbot 需要 {'role': 'user/assistant', 'content': '...'} 格式
-        history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": response_text})
-        return "", history
-    except Exception as e:
-        error_message = f"发送失败: {str(e)}"
-        history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": error_message})
-        return "", history
+        parent_id = gr.Textbox(label="待修订报告编号（留空使用本会话最新报告）")
+        start = gr.Button("开始任务", variant="primary")
+        run_id = gr.Textbox(label="任务编号")
+        previous = gr.Dropdown(label="打开历史任务", choices=[])
+        status = gr.Markdown("选择或提交任务。")
+        with gr.Row():
+            refresh_task = gr.Button("刷新任务")
+            cancel_task = gr.Button("取消任务")
+        steps = gr.Dataframe(headers=["序号", "操作", "状态", "耗时 ms", "结果"], interactive=False)
+        reply = gr.Textbox(label="澄清回复", placeholder="填写需要补充的硬件或材料约束")
+        resume = gr.Button("回复 / 恢复中断任务")
+        report = gr.Markdown()
+        report_id = gr.Textbox(label="报告编号", interactive=False)
+        download = gr.File(label="下载 Markdown 报告", interactive=False)
+        with gr.Accordion("证据原文", open=False):
+            evidence = gr.JSON(label="来源与位置")
+            source_id = gr.Textbox(label="来源编号", placeholder="S1")
+            source_text = gr.Markdown()
+    with gr.Tab("会话记录"):
+        history = gr.Chatbot(label="已保存的对话")
+        reload_history = gr.Button("刷新会话记录")
+    with gr.Tab("添加材料"):
+        project_name = gr.Textbox(label="新项目名称")
+        new_project = gr.Button("创建项目")
+        file = gr.File(label="PDF / Markdown", file_types=[".pdf", ".md", ".markdown"])
+        upload_button = gr.Button("上传到所选项目")
+        upload_status = gr.Textbox(label="摄入结果")
 
-def search(query, project_ids, cross_project, include_outdated, content_types, top_k, time_decay_enabled):
-    """执行搜索"""
-    if not query:
-        return "请输入查询内容"
-    
-    # 构建项目 ID 列表
-    project_ids_list = [pid.strip() for pid in project_ids.split(',') if pid.strip()]
-    # 构建内容类型列表
-    content_types_list = [ct.strip() for ct in content_types.split(',') if ct.strip()]
-    
-    data = {
-        "query": query,
-        "project_ids": project_ids_list,
-        "cross_project": cross_project,
-        "include_outdated": include_outdated,
-        "content_types": content_types_list if content_types_list else ["text", "decision", "milestone"],
-        "top_k": top_k,
-        "time_decay_enabled": time_decay_enabled
-    }
-    
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/api/v1/search",
-            json=data
-        )
-        response.raise_for_status()
-        result = response.json()
-        
-        # 格式化搜索结果
-        results = result.get('results', [])
-        formatted_results = []
-        for item in results:
-            formatted = f"ID: {item.get('id')}\n"
-            formatted += f"类型: {item.get('entity_type')}\n"
-            formatted += f"内容类型: {item.get('content_type')}\n"
-            formatted += f"状态: {item.get('version_status')}\n"
-            formatted += f"得分: {item.get('score', 0):.2f}\n"
-            formatted += f"项目: {', '.join(item.get('project_ids', []))}\n"
-            formatted += "-" * 50
-            formatted_results.append(formatted)
-        
-        return "\n\n".join(formatted_results) if formatted_results else "无结果"
-    except Exception as e:
-        return f"搜索失败: {str(e)}"
-
-# 创建 Gradio 界面
-with gr.Blocks(title="科研 RAG Agent") as demo:
-    gr.Markdown("# 科研 RAG Agent 系统")
-    
-    with gr.Tab("文件上传"):
-        file_input = gr.File(label="选择文件 (PDF/Markdown)")
-        project_ids = gr.Textbox(label="项目 ID (逗号分隔)", placeholder="例如: proj-1, proj-2")
-        description = gr.Textbox(label="描述", placeholder="请输入文档描述")
-        upload_button = gr.Button("上传")
-        upload_output = gr.Textbox(label="上传结果", lines=3)
-        upload_button.click(upload_file, inputs=[file_input, project_ids, description], outputs=upload_output)
-    
-    with gr.Tab("对话"):
-        gr.Markdown(f"会话 ID: {session_id}")
-        chat_project_ids = gr.Textbox(label="项目 ID (逗号分隔)", placeholder="例如: proj-1, proj-2")
-        chatbot = gr.Chatbot(label="对话历史")
-        message = gr.Textbox(label="消息", lines=3, placeholder="请输入您的问题...")
-        include_outdated = gr.Checkbox(label="包含过时知识")
-        send_button = gr.Button("发送")
-        send_button.click(send_message, inputs=[message, chat_project_ids, include_outdated, chatbot], outputs=[message, chatbot])
-    
-    with gr.Tab("搜索"):
-        search_query = gr.Textbox(label="查询内容", lines=2, placeholder="请输入搜索关键词...")
-        search_project_ids = gr.Textbox(label="项目 ID (逗号分隔)", placeholder="例如: proj-1, proj-2")
-        cross_project = gr.Checkbox(label="跨项目搜索")
-        search_include_outdated = gr.Checkbox(label="包含过时知识")
-        content_types = gr.Textbox(label="内容类型 (逗号分隔)", placeholder="例如: text,table,decision")
-        top_k = gr.Slider(label="返回结果数", minimum=1, maximum=20, value=5, step=1)
-        time_decay_enabled = gr.Checkbox(label="启用时间衰减", value=True)
-        search_button = gr.Button("搜索")
-        search_output = gr.Textbox(label="搜索结果", lines=10)
-        search_button.click(search, inputs=[search_query, search_project_ids, cross_project, search_include_outdated, content_types, top_k, time_decay_enabled], outputs=search_output)
+    refresh.click(refresh_choices, outputs=[sessions, projects])
+    demo.load(refresh_choices, outputs=[sessions, projects])
+    projects.change(load_documents, inputs=projects, outputs=documents)
+    sessions.change(load_session, inputs=sessions, outputs=[history, previous])
+    new_session.click(create_session, inputs=projects, outputs=sessions)
+    new_project.click(create_project, inputs=project_name, outputs=projects)
+    reload_history.click(load_session, inputs=sessions, outputs=[history, previous])
+    start.click(
+        submit,
+        inputs=[message, sessions, projects, documents, kind, parent_id],
+        outputs=[run_id, sessions, status],
+    )
+    previous.change(lambda value: value or "", inputs=previous, outputs=run_id)
+    outputs = [status, steps, evidence, report, report_id, download]
+    refresh_task.click(refresh_run, inputs=run_id, outputs=outputs)
+    run_id.change(refresh_run, inputs=run_id, outputs=outputs)
+    gr.Timer(2).tick(refresh_run, inputs=run_id, outputs=outputs)
+    source_id.change(show_source, inputs=[evidence, source_id], outputs=source_text)
+    resume.click(recover, inputs=[run_id, reply], outputs=status)
+    cancel_task.click(cancel, inputs=run_id, outputs=status)
+    upload_button.click(upload, inputs=[file, projects], outputs=upload_status)
 
 if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=settings.gradio_port,
-        share=False
-    )
+    demo.launch(server_name="0.0.0.0", server_port=settings.gradio_port, share=False)

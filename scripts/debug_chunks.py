@@ -13,7 +13,7 @@ from src.core.ingest.markdown_chunker import MarkdownChunker
 
 
 async def debug_chunks():
-    file_path = "/home/guozy/research-rag-agent/working_document.md"
+    file_path = str(Path(__file__).resolve().parents[1] / 'working_document.md')
 
     parser = EnhancedMarkdownParser()
     cleaner = MarkdownCleaner()

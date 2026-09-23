@@ -1,22 +1,18 @@
+import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from loguru import logger
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_orchestrator
 from src.config.settings import settings
-from src.core.agent.history import load_recent_history
 from src.core.agent.orchestrator import AgentOrchestrator
 from src.db.chat_store import (
     append_message,
-    create_run,
-    finish_run,
-    get_or_create_session,
-    persist_tool_trace,
 )
-from src.db.models import AgentRun, AgentStep, ChatSession, Conversation
+from src.db.models import AgentRun, AgentStep, ChatSession, Conversation, ReportArtifact, utc_now
 from src.db.postgres import get_db
 from src.schemas.chat import (
     AgentRunItem,
@@ -30,12 +26,175 @@ from src.schemas.chat import (
     ChatSessionItem,
     ChatSessionListResponse,
     ChatSessionResponse,
+    ResumeRequest,
 )
 
 router = APIRouter()
 
 MAX_PAGE_SIZE = 200
 DEFAULT_MESSAGE_PAGE_SIZE = 50
+
+
+@router.get("/runtime")
+async def runtime_identity():
+    import hashlib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    return {
+        "model": settings.llm_model_name,
+        "provider": settings.llm_provider,
+        "vector_backend": settings.vector_store_backend,
+        "embedding_model": settings.embedding_model,
+        "embedding_provider": settings.embedding_provider,
+        "embedding_dimension": settings.embedding_dimension,
+        "reranker_model": settings.reranker_model,
+        "reranker_provider": settings.reranker_provider,
+        "temperature": 0,
+        "reasoning_effort": settings.llm_reasoning_effort,
+        "llm_timeout_seconds": settings.llm_timeout_seconds,
+        "agent_search_top_k": settings.agent_search_top_k,
+        "code_hashes": {
+            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted((root / "src").rglob("*.py"))
+        },
+    }
+
+
+@router.post("/runs", status_code=202)
+async def submit_run(
+    request: ChatMessageRequest,
+    http_request: Request,
+    orchestrator: Annotated[AgentOrchestrator, Depends(get_orchestrator)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    from src.core.agent.service import prepare_run, schedule
+
+    run = await prepare_run(db, request)
+    database = http_request.app.dependency_overrides.get(get_db, get_db)
+    schedule(run.id, database, orchestrator)
+    return {"run_id": run.id, "status": run.status, "session_id": run.session_id}
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, db: Annotated[AsyncSession, Depends(get_db)]):
+    from src.core.agent.service import workers
+
+    run = await db.get(AgentRun, run_id)
+    if run is None:
+        raise HTTPException(404, "任务不存在")
+    if run.status in {"completed", "insufficient_evidence", "budget_exceeded", "cancelled"}:
+        return {"run_id": run.id, "status": run.status}
+    task = workers.get(run_id)
+    if task:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await db.refresh(run)
+    run.status, run.error, run.finished_at = "cancelled", "user_cancelled", utc_now()
+    await db.execute(
+        update(ChatSession).where(ChatSession.active_run_id == run.id).values(active_run_id=None)
+    )
+    db.add(run)
+    await db.commit()
+    return {"run_id": run.id, "status": run.status}
+
+
+@router.post("/runs/{run_id}/resume", status_code=202)
+async def resume_run(
+    run_id: str,
+    request: ResumeRequest,
+    http_request: Request,
+    orchestrator: Annotated[AgentOrchestrator, Depends(get_orchestrator)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    from src.core.agent.service import schedule, workers
+
+    run = await db.get(AgentRun, run_id)
+    if run is None:
+        raise HTTPException(404, "任务不存在")
+    if run.id in workers:
+        raise HTTPException(409, "任务已在执行")
+    if run.status in {"completed", "insufficient_evidence"}:
+        return {
+            "run_id": run.id,
+            "status": run.status,
+            "report_id": (run.state or {}).get("report_id"),
+        }
+    if run.status in {"cancelled", "budget_exceeded"}:
+        raise HTTPException(409, "任务已终止，不能通过恢复重置预算")
+    if not (run.state or {}).get("request"):
+        raise HTTPException(409, "旧任务没有恢复所需 checkpoint")
+    if run.status == "waiting_user" and not (request.message or "").strip():
+        raise HTTPException(422, "请提供澄清回复")
+    chat = await db.get(ChatSession, run.session_id)
+    claimed = await db.execute(
+        update(ChatSession)
+        .where(
+            ChatSession.id == chat.id,
+            (ChatSession.active_run_id.is_(None)) | (ChatSession.active_run_id == run.id),
+        )
+        .values(active_run_id=run.id)
+    )
+    if claimed.rowcount != 1:
+        raise HTTPException(409, "会话正在执行另一任务")
+    if request.message:
+        await append_message(db, chat, "user", request.message, run_id=run.id)
+    run.state = {**run.state, "finalized": False}
+    run.status, run.error, run.finished_at = "running", None, None
+    db.add(run)
+    await db.commit()
+    schedule(
+        run.id,
+        http_request.app.dependency_overrides.get(get_db, get_db),
+        orchestrator,
+        request.message,
+    )
+    return {"run_id": run.id, "status": run.status}
+
+
+@router.get("/reports/{report_id}")
+async def get_report(report_id: str, db: Annotated[AsyncSession, Depends(get_db)]):
+    report = await db.get(ReportArtifact, report_id)
+    if report is None:
+        raise HTTPException(404, "报告不存在")
+    return {
+        key: getattr(report, key)
+        for key in (
+            "id",
+            "run_id",
+            "session_id",
+            "parent_report_id",
+            "title",
+            "markdown",
+            "structured",
+            "evidence",
+            "project_ids",
+            "created_at",
+        )
+    }
+
+
+@router.get("/reports/{report_id}/download")
+async def download_report(report_id: str, db: Annotated[AsyncSession, Depends(get_db)]):
+    report = await db.get(ReportArtifact, report_id)
+    if report is None:
+        raise HTTPException(404, "报告不存在")
+    return Response(
+        report.markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="report-{report.id}.md"'},
+    )
+
+
+@router.get("/runs/{run_id}/results/{operation_id}")
+async def get_tool_result(
+    run_id: str, operation_id: str, db: Annotated[AsyncSession, Depends(get_db)]
+):
+    run = await db.get(AgentRun, run_id)
+    for entry in (run.state or {}).get("execution", {}).get("trace", []) if run else []:
+        if entry.get("operation_id") == operation_id:
+            return entry
+    raise HTTPException(404, "工具结果不存在")
 
 
 def _isoformat(value: object) -> str | None:
@@ -110,63 +269,22 @@ async def send_message(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ChatMessageResponse:
     """发送对话消息：会话不存在则自动创建，历史从数据库加载。"""
-    run: AgentRun | None = None
+    from src.core.agent.service import execute_run, prepare_run, workers
+
+    run = await prepare_run(db, request)
+    workers[run.id] = asyncio.current_task()
     try:
-        chat_session = await get_or_create_session(
-            db,
-            request.session_id,
-            request.project_ids,
-            title_hint=request.message,
+        result = await execute_run(db, orchestrator, run)
+    finally:
+        workers.pop(run.id, None)
+    if result["run_status"] == "failed":
+        raise HTTPException(
+            500,
+            {"run_id": run.id, "run_status": "failed", "reason": result.get("termination_reason")},
         )
-        history = await load_recent_history(db, chat_session.id, settings.context_recent_turns)
-        run = await create_run(db, chat_session, goal=request.message)
-        await append_message(db, chat_session, "user", request.message, run_id=run.id)
-
-        result = await orchestrator.handle_message(
-            message=request.message,
-            project_ids=request.project_ids,
-            session_id=chat_session.id,
-            history=history,
-            include_outdated=request.include_outdated,
-        )
-
-        await persist_tool_trace(db, run, result.get("tool_trace") or [])
-        citations = result.get("citations", [])
-        await append_message(
-            db,
-            chat_session,
-            "assistant",
-            result.get("response", ""),
-            run_id=run.id,
-            message_metadata={
-                "citation_ids": [citation.get("source_id") for citation in citations],
-                "invalid_citation_ids": result.get("invalid_citation_ids", []),
-            },
-        )
-        await finish_run(db, run, status="completed")
-
-        response = ChatMessageResponse(
-            session_id=chat_session.id,
-            response=result.get("response", ""),
-            extracted_memories=result.get("extracted_memories", []),
-            retrieved_context=result.get("retrieved_context", []),
-            citations=citations,
-            invalid_citation_ids=result.get("invalid_citation_ids", []),
-            tool_trace=result.get("tool_trace", []),
-            run_id=run.id,
-            run_status=run.status,
-        )
-        logger.info(f"聊天消息处理完成: session_id={chat_session.id}, run_id={run.id}")
-        return response
-
-    except Exception as e:
-        logger.error(f"聊天消息处理失败: {str(e)}")
-        if run is not None:
-            try:
-                await finish_run(db, run, status="failed", error=str(e))
-            except Exception as finish_error:
-                logger.error(f"写入 run 失败状态时出错: {finish_error}")
-        raise HTTPException(status_code=500, detail=f"聊天消息处理失败: {str(e)}") from e
+    return ChatMessageResponse(
+        **{k: v for k, v in result.items() if k in ChatMessageResponse.model_fields}
+    )
 
 
 @router.post("/sessions", response_model=ChatSessionItem, status_code=201)

@@ -145,9 +145,9 @@ def main() -> int:
     parser.add_argument("--skip-concurrency", action="store_true")
     args = parser.parse_args()
     config = load_env_file(args.env_file)
-    llm = api_root(config.get("LLM_BASE_URL", "http://133.133.135.63:8000"))
-    embedding = api_root(config.get("EMBEDDING_BASE_URL", "http://133.133.135.63:8001"))
-    reranker = api_root(config.get("RERANKER_BASE_URL", "http://133.133.135.62:8001"))
+    llm = api_root(config.get("LLM_BASE_URL", "http://localhost:8000"))
+    embedding = api_root(config.get("EMBEDDING_BASE_URL", "http://localhost:8001"))
+    reranker = api_root(config.get("RERANKER_BASE_URL", "http://localhost:8001"))
     endpoints = [
         (
             "llm",

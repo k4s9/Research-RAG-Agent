@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.settings import settings
@@ -12,6 +13,10 @@ from src.core.agent.trace import build_result_ref, summarize_tool_result
 from src.db.models import AgentRun, AgentStep, ChatSession, Conversation, utc_now
 
 MAX_TITLE_CHARS = 60
+
+
+class SessionBusy(ValueError):
+    pass
 
 
 def derive_session_title(message: str, max_length: int = MAX_TITLE_CHARS) -> str:
@@ -45,6 +50,8 @@ async def get_or_create_session(
         await db.commit()
         await db.refresh(chat_session)
         return chat_session
+    if chat_session.active_run_id and list(chat_session.project_ids or []) != scoped_projects:
+        raise SessionBusy("未完成任务的项目范围不能修改")
     if scoped_projects and list(chat_session.project_ids or []) != scoped_projects:
         chat_session.project_ids = scoped_projects
         db.add(chat_session)
@@ -96,6 +103,7 @@ async def create_run(
 ) -> AgentRun:
     """Create the run row before any model or tool work starts."""
     run = AgentRun(
+        id=str(uuid.uuid4()),
         session_id=chat_session.id,
         run_type=run_type,
         goal=goal,
@@ -110,6 +118,16 @@ async def create_run(
         max_steps=settings.agent_max_steps,
         started_at=utc_now(),
     )
+    claimed = await db.execute(
+        update(ChatSession)
+        .where(
+            ChatSession.id == chat_session.id,
+            ChatSession.active_run_id.is_(None),
+        )
+        .values(active_run_id=run.id)
+    )
+    if claimed.rowcount != 1:
+        raise SessionBusy("会话有未完成任务，请先恢复或取消该任务")
     db.add(run)
     await db.commit()
     await db.refresh(run)
@@ -126,6 +144,12 @@ async def finish_run(
     run.status = status
     run.error = error
     run.finished_at = utc_now()
+    if status != "waiting_user":
+        await db.execute(
+            update(ChatSession)
+            .where(ChatSession.id == run.session_id, ChatSession.active_run_id == run.id)
+            .values(active_run_id=None)
+        )
     db.add(run)
     await db.commit()
 
@@ -138,7 +162,7 @@ async def persist_tool_trace(
     """Write tool_call / observation pairs for every executed tool call."""
     if not trace:
         return 0
-    next_index = int(run.step_count or 0)
+    next_index = 0
     added = 0
     for entry in trace:
         tool_name = entry.get("tool")
@@ -146,27 +170,38 @@ async def persist_tool_trace(
         error = entry.get("error")
         result = entry.get("result")
         duration_ms = entry.get("duration_ms")
-        db.add(
-            AgentStep(
-                run_id=run.id,
-                step_index=next_index,
-                step_type="tool_call",
-                tool_name=tool_name,
-                arguments=arguments if isinstance(arguments, dict) else None,
-            ),
+        existing = (
+            (
+                await db.execute(
+                    select(AgentStep).where(
+                        AgentStep.run_id == run.id,
+                        AgentStep.step_index.in_([next_index, next_index + 1]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
-        db.add(
-            AgentStep(
-                run_id=run.id,
-                step_index=next_index + 1,
-                step_type="observation",
-                tool_name=tool_name,
-                result_summary=summarize_tool_result(result, error),
-                result_ref=build_result_ref(tool_name, result),
-                error=error,
-                duration_ms=duration_ms if isinstance(duration_ms, int) else None,
-            ),
+        by_index = {step.step_index: step for step in existing}
+        call_step = by_index.get(next_index) or AgentStep(
+            run_id=run.id,
+            step_index=next_index,
+            step_type="tool_call",
+            tool_name=tool_name,
         )
+        call_step.arguments = arguments if isinstance(arguments, dict) else None
+        db.add(call_step)
+        observation = by_index.get(next_index + 1) or AgentStep(
+            run_id=run.id,
+            step_index=next_index + 1,
+            step_type="observation",
+            tool_name=tool_name,
+        )
+        observation.result_summary = summarize_tool_result(result, error)
+        observation.result_ref = build_result_ref(tool_name, result)
+        observation.error = error
+        observation.duration_ms = duration_ms if isinstance(duration_ms, int) else None
+        db.add(observation)
         next_index += 2
         added += 2
     run.step_count = next_index

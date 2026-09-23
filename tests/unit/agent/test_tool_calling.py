@@ -73,3 +73,32 @@ async def test_native_tool_loop_returns_structured_citation() -> None:
 def test_tool_scope_cannot_expand_caller_projects() -> None:
     with pytest.raises(ToolExecutionError, match="exceeds"):
         ResearchToolRegistry._scope(["other-project"], ["project-1"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", [None, 1, 20])
+async def test_agent_search_top_k_is_enforced_and_observable(monkeypatch, requested):
+    from src.config.settings import settings
+
+    monkeypatch.setattr(settings, "agent_search_top_k", 3)
+    captured = {}
+
+    class Searcher:
+        def search(self, **kwargs):
+            captured.update(kwargs)
+            return [{"id": str(i), "content": "evidence"} for i in range(6)]
+
+    async def hydrate(results, project_ids):
+        return results
+
+    args = {"query": "memory"}
+    if requested is not None:
+        args["top_k"] = requested
+    result = await ResearchToolRegistry(Searcher(), hydrator=hydrate).search_knowledge(
+        args, project_ids=["p"], session_id="s"
+    )
+    expected = min(requested or 3, 3)
+    assert captured["top_k"] == expected
+    assert len(result["results"]) == expected
+    assert result["requested_top_k"] == (requested or 3)
+    assert result["effective_top_k"] == expected

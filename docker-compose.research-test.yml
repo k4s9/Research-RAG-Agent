@@ -1,0 +1,35 @@
+# Isolated test services; no existing containers/collections are replaced.
+services:
+  research-minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    command: minio server /data
+    environment:
+      MINIO_ROOT_USER: research_local
+      MINIO_ROOT_PASSWORD: research_local_only
+    volumes:
+      - research-minio-data:/data
+  research-milvus:
+    image: milvusdb/milvus:v2.5.2
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      COMMON_STORAGETYPE: remote
+      MINIO_ADDRESS: research-minio:9000
+      MINIO_ACCESS_KEY: research_local
+      MINIO_SECRET_KEY: research_local_only
+    ports:
+      - "127.0.0.1:19530:19530"
+      - "127.0.0.1:9091:9091"
+    volumes:
+      - research-milvus-data:/var/lib/milvus
+    depends_on:
+      - research-minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10 seconds
+      timeout: 5 seconds
+      retries: 12
+volumes:
+  research-minio-data:
+  research-milvus-data:

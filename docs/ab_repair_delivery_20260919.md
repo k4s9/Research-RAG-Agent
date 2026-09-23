@@ -40,7 +40,7 @@ HTTPX 已在项目 dev extra 声明，本次移入运行依赖，没有安装新
 环境：Linux，conda `research_rag`。
 
 ```bash
-source /home/guozy/miniconda3/etc/profile.d/conda.sh
+source ~/miniconda3/etc/profile.d/conda.sh
 conda activate research_rag
 VECTOR_STORE_BACKEND=memory LLM_PROVIDER=local python -m pytest -m unit -q
 VECTOR_STORE_BACKEND=memory LLM_PROVIDER=local python -m pytest -m e2e -q -rs

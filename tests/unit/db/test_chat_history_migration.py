@@ -120,7 +120,9 @@ def test_backfill_preserves_existing_session_and_issued_cursors(tmp_path: Path) 
     migrate(path, "20260918_02")
     engine = create_engine(f"sqlite:///{path}")
     with Session(engine) as session:
-        session.add(ChatSession(id="legacy", title="custom title", project_ids=["p1"]))
+        # Seed the old schema without using the current ORM's newly added columns.
+        from sqlalchemy import text
+        session.execute(text("INSERT INTO chat_session (id, title, project_ids, status, summary_upto_turn) VALUES ('legacy', 'custom title', '[\"p1\"]', 'active', 0)"))
         session.add(
             Conversation(
                 id="c4",

@@ -8,7 +8,7 @@ def get_rag_prompt(
     # 构建检索到的相关知识
     retrieved_chunks = []
     for i, result in enumerate(search_results):
-        chunk = f"""[S{i + 1}]
+        chunk = f"""[{result.get('source_id', f'S{i + 1}')}]
 内容: {result.get("content", "")}
 来源: {result.get("filename", result.get("source", ""))} {result.get("locator", "")}
 """

@@ -20,7 +20,7 @@ class AsyncLLMClient:
             raise ValueError(f"不支持的 LLM 提供商: {settings.llm_provider}")
         if self.http_client is not None:
             return await self._request(self.http_client, prompt)
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
             return await self._request(client, prompt)
 
     async def _request(self, client: httpx.AsyncClient, prompt: str) -> str:
@@ -29,6 +29,7 @@ class AsyncLLMClient:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7,
             "max_tokens": 1024,
+            **LLMClient.inference_options(),
         }
         attempts = max(1, settings.request_retry_attempts)
         for attempt in range(attempts):
@@ -37,7 +38,7 @@ class AsyncLLMClient:
                     f"{settings.llm_base_url.rstrip('/')}/chat/completions",
                     headers={"Authorization": f"Bearer {settings.llm_api_key}"},
                     json=payload,
-                    timeout=30,
+                    timeout=settings.llm_timeout_seconds,
                 )
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]

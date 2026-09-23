@@ -184,4 +184,4 @@ if __name__ == "__main__":
     inspector = MilvusInspector()
     inspector.show_all()
 
-# /home/guozy/miniconda3/envs/research_rag/bin/python scripts/inspect_milvus.py
+# python scripts/inspect_milvus.py

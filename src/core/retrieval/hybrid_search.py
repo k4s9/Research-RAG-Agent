@@ -143,7 +143,7 @@ class HybridSearch:
                 continue
             seen.add(index)
             result = dict(candidates[index])
-            result["rerank_score"] = float(item.get("score", 0.0))
+            result["rerank_score"] = float(item.get("score", item.get("relevance_score", 0.0)))
             result["score"] = result["rerank_score"]
             result["rerank_rank"] = rank
             output.append(result)
