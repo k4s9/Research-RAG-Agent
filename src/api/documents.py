@@ -25,6 +25,7 @@ from src.config.settings import settings
 from src.core.document_view import build_document_outline
 from src.core.ingest.enrichment import DocumentEnricher
 from src.core.ingest.pipeline import DocumentIngestPipeline
+from src.core.ingest.pdf_quality import PDFQualityError
 from src.db.models import Chunk, Document, IngestBatch, Project
 from src.db.postgres import get_db
 from src.schemas.document import (
@@ -230,6 +231,15 @@ async def upload_document(
             title=result.get("title"),
         )
 
+    except PDFQualityError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "document_id": exc.document_id,
+                "page_results": exc.page_results,
+            },
+        ) from exc
     except HTTPException:
         raise
     except Exception as e:
@@ -259,6 +269,7 @@ async def get_document_status(
         stage=metadata.get("stage"),
         chunk_count=metadata.get("chunk_count"),
         error=metadata.get("error"),
+        page_results=metadata.get("page_results", []),
     )
 
 

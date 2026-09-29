@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import fitz
 import pytest
 
 from src.core.ingest.pipeline import DocumentIngestPipeline
+from src.core.ingest.pdf_quality import PDFQualityError
 from src.db.models import Document, Project
 
 
@@ -120,6 +122,53 @@ async def test_pipeline_marks_document_ready_after_confirmed_vector_insert(tmp_p
     assert document.parse_metadata["stage"] == "ready"
     assert document.parse_metadata["chunk_count"] == 1
     assert len(vector_store.entities) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_scan", [False, True])
+async def test_pdf_page_coverage_is_checked_before_embedding(tmp_path: Path, include_scan: bool):
+    source = tmp_path / "mixed.pdf"
+    with fitz.open() as image_source:
+        image_source.new_page().insert_text((72, 72), "Evidence in a scanned image.")
+        png = image_source[0].get_pixmap().tobytes("png")
+    with fitz.open() as document:
+        document.new_page().insert_text((72, 72), "Native evidence.")
+        second = document.new_page()
+        if include_scan:
+            second.insert_image(second.rect, stream=png)
+        document.save(source)
+
+    class RecordingEmbedder(FakeEmbedder):
+        def __init__(self):
+            self.calls = []
+
+        def embed(self, texts):
+            self.calls.append(texts)
+            return super().embed(texts)
+
+    session = FakeSession()
+    embedder = RecordingEmbedder()
+    vectors = FakeVectorStore()
+    pipeline = DocumentIngestPipeline(
+        embedder=embedder, vector_store=vectors, db_session_factory=session_factory(session),
+    )
+    if include_scan:
+        with pytest.raises(PDFQualityError, match="第 2 页") as error:
+            await pipeline.process_document(str(source), ["project-1"])
+        document = session.documents[error.value.document_id]
+        assert document.status == "failed"
+        assert not embedder.calls
+        assert not vectors.entities
+        assert document.parse_metadata["page_results"][1]["status"] == "needs_ocr"
+    else:
+        result = await pipeline.process_document(str(source), ["project-1"])
+        document = session.documents[result["document_id"]]
+        assert result["status"] == "ready"
+        assert document.parse_metadata["page_results"][1]["status"] == "blank"
+        assert document.parse_metadata["page_results"][1]["chunk_count"] == 0
+        assert document.parse_metadata["page_results"][0]["chunk_count"] > 0
+        assert len(embedder.calls) == 1
+    assert document.parse_metadata["pdf_ingest_version"] == "native-v2"
 
 
 @pytest.mark.asyncio

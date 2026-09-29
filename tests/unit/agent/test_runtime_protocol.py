@@ -27,7 +27,10 @@ class Model:
 
     def generate_with_tools(self, prompt, **kwargs):
         self.messages.append(deepcopy(kwargs["tool_messages"]))
-        response = next(self.responses)
+        try:
+            response = next(self.responses)
+        except StopIteration:
+            raise AssertionError("unexpected extra model request") from None
         if isinstance(response, Exception):
             raise response
         return response
@@ -122,8 +125,11 @@ async def test_missing_report_sections_are_rejected_then_corrected():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("budget", [{"model_calls": 2}, {"tool_calls": 2}])
-async def test_valid_report_with_gaps_is_saved_when_no_followup_call_remains(budget):
+@pytest.mark.parametrize("budget", [
+    {"model_calls": 2}, {"tool_calls": 2},
+    {"model_calls": 3}, {"tool_calls": 3}, {"model_calls": 3, "tool_calls": 3},
+])
+async def test_valid_report_with_gaps_is_saved_without_budget_for_read_and_resubmit(budget):
     report = dict(title="Comparison", summary="A needs 8 GB.", documents=["A"],
                   dimensions=["memory"], claims=[dict(dimension="memory", document_id="A",
                   statement="A costs 8 GB.", verdict="supported", source_ids=["S1"],
@@ -136,6 +142,28 @@ async def test_valid_report_with_gaps_is_saved_when_no_followup_call_remains(bud
     assert result["report"]["unresolved"] == report["unresolved"]
     assert result["tool_trace"][-1]["result"] == {"accepted": True}
     assert result["usage"]["model_calls"] == result["usage"]["tool_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_gap_followup_remains_available_with_budget_for_read_and_resubmit():
+    report = dict(title="Comparison", summary="A needs 8 GB.", documents=["A"],
+                  dimensions=["memory"], claims=[dict(dimension="memory", document_id="A",
+                  statement="A costs 8 GB.", verdict="supported", source_ids=["S1"],
+                  quotes=["A costs 8 GB."])], recommendation="Use A in the reported setting.",
+                  incomparable=[], unresolved=["Energy was not measured."])
+    registry = Registry()
+    model = Model(envelope(call("search_knowledge", {"query": "A"})),
+                  envelope(call("submit_report", report)),
+                  envelope(call("search_knowledge", {"query": "energy"})),
+                  envelope(call("submit_report", report)))
+    result = await execute(model, registry, strategy="b2", task_type="compare",
+                           budget={"model_calls": 4, "tool_calls": 4})
+    assert result["run_status"] == "insufficient_evidence"
+    assert result["tool_trace"][1]["result"]["evidence_gap"] is True
+    assert registry.calls == [("search_knowledge", {"query": "A"}),
+                              ("search_knowledge", {"query": "energy"})]
+    assert result["usage"]["model_calls"] == result["usage"]["tool_calls"] == 4
+    assert result["report"]["unresolved"] == report["unresolved"]
 
 
 @pytest.mark.asyncio

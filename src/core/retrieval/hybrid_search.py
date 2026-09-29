@@ -4,6 +4,7 @@ from typing import Any
 from loguru import logger
 
 from src.config.settings import settings
+from src.core.retrieval.bm25 import RetrievalScopeError
 from src.core.retrieval.embedder import Qwen3Embedder
 from src.core.retrieval.reranker import Qwen3Reranker
 from src.core.retrieval.rrf_fusion import rrf_fusion
@@ -40,7 +41,12 @@ class HybridSearch:
         content_types: list[str] | None = None,
         time_decay_enabled: bool = False,
         chunk_ids: list[str] | None = None,
+        authoritative_scope: bool = False,
     ) -> list[dict[str, Any]]:
+        # Only server-side PostgreSQL scope resolution may set this flag. Model
+        # tool arguments and the public API do not expose it.
+        if authoritative_scope and chunk_ids is None:
+            raise ValueError("authoritative_scope requires resolved chunk_ids")
         if chunk_ids == []:
             return []
         query_embedding = self.embedder.embed([query])[0]
@@ -50,15 +56,15 @@ class HybridSearch:
         filters = []
         if chunk_ids is not None:
             filters.append(f"id in {json.dumps(chunk_ids, ensure_ascii=False)}")
-        if not include_outdated:
+        if not authoritative_scope and not include_outdated:
             filters.append("version_status == 'active'")
-        if project_ids:
+        if not authoritative_scope and project_ids:
             project_filters = [
                 f"ARRAY_CONTAINS(project_ids, '{self._literal(project_id)}')"
                 for project_id in project_ids
             ]
             filters.append("(" + " || ".join(project_filters) + ")")
-        if content_types:
+        if not authoritative_scope and content_types:
             content_filter = " || ".join(
                 f"content_type == '{self._literal(content_type)}'" for content_type in content_types
             )
@@ -81,6 +87,10 @@ class HybridSearch:
                 top_k=settings.sparse_top_k,
                 filter=filter_expression,
             )
+        except RetrievalScopeError:
+            # A corpus cap is not a transient channel outage: silently falling
+            # back would conceal that the requested complete search did not run.
+            raise
         except (AttributeError, NotImplementedError) as exc:
             logger.warning(f"BM25 通道不可用，回退到 Dense: {exc}")
             sparse_results = []

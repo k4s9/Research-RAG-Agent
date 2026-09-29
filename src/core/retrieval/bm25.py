@@ -15,6 +15,15 @@ from typing import Any
 
 TOKEN_PATTERN = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]", re.IGNORECASE)
 
+# This local scorer intentionally serves small project corpora. Exceeding the
+# boundary is an explicit error, never a top-N sample masquerading as the corpus.
+MAX_RETRIEVAL_CANDIDATES = 10_000
+MAX_BM25_CORPUS_BYTES = 16 * 1024 * 1024
+
+
+class RetrievalScopeError(ValueError):
+    """The complete requested corpus exceeds this deployment's search capacity."""
+
 
 def tokenize(text: str) -> list[str]:
     """Tokenize English words and Chinese characters consistently."""

@@ -89,6 +89,15 @@ class Settings(BaseSettings):
     context_recent_turns: int = 6
 
     # OCR
+    # Optional local tokenizer.json matching the deployed embedding model.
+    # Unset means explicitly measured UTF-8 bytes, not model token counts.
+    pdf_tokenizer_path: str | None = None
+
+    @field_validator("pdf_tokenizer_path", mode="before")
+    @classmethod
+    def optional_pdf_tokenizer(cls, value):
+        return None if value == "" else value
+
     use_ocr: bool = True
     ocr_lang: str = "ch"
 

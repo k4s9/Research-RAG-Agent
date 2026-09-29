@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,7 @@ class DocumentStatusResponse(BaseModel):
     stage: str | None = None
     chunk_count: int | None = None
     error: str | None = None
+    page_results: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DocumentItem(BaseModel):

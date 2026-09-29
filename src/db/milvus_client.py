@@ -2,7 +2,12 @@ from loguru import logger
 from pymilvus import DataType, MilvusClient
 
 from src.config.settings import settings
-from src.core.retrieval.bm25 import BM25Retriever
+from src.core.retrieval.bm25 import (
+    BM25Retriever,
+    MAX_BM25_CORPUS_BYTES,
+    MAX_RETRIEVAL_CANDIDATES,
+    RetrievalScopeError,
+)
 
 COLLECTION_NAME = settings.milvus_collection
 REQUIRED_FIELDS = {
@@ -179,9 +184,12 @@ class MilvusClientWrapper:
         room to replace this method with a native sparse index later.
         """
         try:
-            limit = max(top_k, settings.sparse_top_k)
-            rows = self.client.query(
+            if top_k <= 0:
+                return []
+            iterator = self.client.query_iterator(
                 collection_name=self.collection_name,
+                batch_size=256,
+                limit=-1,
                 filter=filter or "",
                 output_fields=[
                     "id",
@@ -192,8 +200,26 @@ class MilvusClientWrapper:
                     "content_type",
                     "created_at",
                 ],
-                limit=limit,
             )
+            rows = []
+            seen = set()
+            text_bytes = 0
+            try:
+                while batch := iterator.next():
+                    for row in batch:
+                        identifier = row.get("id")
+                        if not identifier or identifier in seen:
+                            raise RuntimeError("Milvus corpus iterator returned missing or duplicate IDs")
+                        seen.add(identifier)
+                        text_bytes += len(str(row.get("content", "")).encode("utf-8"))
+                        if len(seen) > MAX_RETRIEVAL_CANDIDATES or text_bytes > MAX_BM25_CORPUS_BYTES:
+                            raise RetrievalScopeError(
+                                "当前完整 BM25 检索最多支持 10000 个候选块及 16 MiB 正文；"
+                                "请缩小项目或文档筛选范围。未返回截断语料的排名。",
+                            )
+                        rows.append(row)
+            finally:
+                iterator.close()
             return BM25Retriever().search(query, rows, top_k=top_k)
         except Exception as exc:
             logger.error(f"Milvus BM25 搜索失败: {exc}")

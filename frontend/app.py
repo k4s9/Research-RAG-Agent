@@ -27,7 +27,12 @@ STATUS_NAMES = {
 def api(method, path, **kwargs):
     response = requests.request(method, API + path, timeout=40, **kwargs)
     if not response.ok:
-        raise gr.Error(response.text[:1000])
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        message = detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
+        raise gr.Error(message[:1000])
     return response.json()
 
 

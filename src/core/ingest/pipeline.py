@@ -9,12 +9,15 @@ from loguru import logger
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config.settings import settings
 from src.core.ingest.cleaner import DocumentCleaner
 from src.core.ingest.markdown_chunker import MarkdownChunker
 from src.core.ingest.markdown_parser import EnhancedMarkdownParser
 from src.core.ingest.metadata import extract_document_metadata
 from src.core.ingest.pdf_chunker import PDFChunker
 from src.core.ingest.pdf_parser import PDFParser
+from src.core.ingest.pdf_quality import PDF_INGEST_VERSION, PDFQualityError, pdf_page_results
+from src.core.ingest.text_budget import TextBudget
 from src.core.retrieval.embedder import Qwen3Embedder
 from src.db.models import Chunk, Document, Project, utc_now
 from src.db.postgres import get_db as get_db_session
@@ -37,11 +40,17 @@ class DocumentIngestPipeline:
         embedder: Qwen3Embedder | None = None,
         vector_store: VectorStore | None = None,
         db_session_factory: Callable[[], AsyncIterator[AsyncSession]] | None = None,
+        pdf_budget: TextBudget | None = None,
     ) -> None:
         self.pdf_parser = pdf_parser or PDFParser()
         self.markdown_parser = markdown_parser or EnhancedMarkdownParser()
         self.cleaner = cleaner or DocumentCleaner()
-        self.pdf_chunker = PDFChunker(chunk_size=chunk_size, overlap=overlap)
+        self.pdf_chunker = PDFChunker(
+            chunk_size=chunk_size,
+            overlap=overlap,
+            budget=pdf_budget,
+            tokenizer_path=settings.pdf_tokenizer_path if pdf_budget is None else None,
+        )
         self.markdown_chunker = MarkdownChunker(chunk_size=chunk_size, overlap=overlap)
         self.embedder = embedder or Qwen3Embedder()
         self.vector_store = vector_store
@@ -84,10 +93,25 @@ class DocumentIngestPipeline:
                 result.scalar_one_or_none() if hasattr(result, "scalar_one_or_none") else None
             )
             if existing is not None:
+                added_project_ids = []
                 for project in projects:
                     if project not in existing.projects:
                         existing.projects.append(project)
+                        added_project_ids.append(project.id)
                 await session.commit()
+                if added_project_ids and self.vector_store is not None:
+                    # Deduplication reuses chunks, so refresh their searchable
+                    # scope without re-embedding or creating duplicate vectors.
+                    chunk_rows = await session.execute(
+                        select(Chunk.id).where(Chunk.document_id == existing.id),
+                    )
+                    chunk_ids = [chunk_id for (chunk_id,) in chunk_rows.all()]
+                    for chunk_id in chunk_ids:
+                        entity = getattr(self.vector_store, "_entities", {}).get(chunk_id)
+                        if entity is not None:
+                            entity["project_ids"] = sorted(
+                                set(entity.get("project_ids", [])) | set(added_project_ids),
+                            )
                 if existing.status in {"ready", "processing"}:
                     metadata = existing.parse_metadata or {}
                     return existing.id, {
@@ -139,12 +163,14 @@ class DocumentIngestPipeline:
         status: str,
         stage: str,
         error: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         async for session in self.db_session_factory():
             document = await session.get(Document, document_id)
             if document is None:
                 break
             metadata = dict(document.parse_metadata or {})
+            metadata.update(details or {})
             metadata["stage"] = stage
             if error:
                 metadata["error"] = error[:1000]
@@ -228,6 +254,17 @@ class DocumentIngestPipeline:
                 raise ValueError(f"解析器返回的文件类型不匹配: {parsed_content.get('file_type')}")
 
             cleaned_content = self.cleaner.clean(parsed_content)
+            pdf_metadata: dict[str, Any] = {}
+            if file_type == "pdf":
+                page_results = pdf_page_results(parsed_content, cleaned_content)
+                pdf_metadata = {
+                    "pdf_ingest_version": PDF_INGEST_VERSION,
+                    "page_results": page_results,
+                    "page_count": len(page_results),
+                }
+                await self._set_status(document_id, "processing", "quality_check", details=pdf_metadata)
+                if any(page["status"] not in {"ok", "blank"} for page in page_results):
+                    raise PDFQualityError(page_results)
             chunks = []
             for chunk_result in self._get_chunker(file_type).chunk(cleaned_content):
                 content = chunk_result.content.replace("\x00", "").strip()
@@ -242,6 +279,16 @@ class DocumentIngestPipeline:
                     )
             if not chunks:
                 raise ValueError("文档未生成可索引的文本块")
+            if file_type == "pdf":
+                for page in pdf_metadata["page_results"]:
+                    page["chunk_count"] = sum(
+                        chunk["metadata"].get("page_num") == page["page_num"] for chunk in chunks
+                    )
+                    if page["status"] == "ok" and page["chunk_count"] == 0:
+                        page.update(status="needs_review", reason="no_chunks_for_text_page")
+                if any(page["status"] not in {"ok", "blank"} for page in pdf_metadata["page_results"]):
+                    await self._set_status(document_id, "processing", "quality_check", details=pdf_metadata)
+                    raise PDFQualityError(pdf_metadata["page_results"])
 
             document_metadata = extract_document_metadata(
                 parsed_content,
@@ -255,6 +302,7 @@ class DocumentIngestPipeline:
                 chunk["dense_vector"] = dense_vector
 
             parse_metadata = {
+                **pdf_metadata,
                 "page_count": len(parsed_content.get("pages", [])),
                 "section_count": parsed_content.get("total_sections", 0),
                 "block_count": parsed_content.get("total_blocks", 0),
@@ -305,6 +353,8 @@ class DocumentIngestPipeline:
                 "doc_type": document_metadata["doc_type"],
             }
         except Exception as exc:
+            if isinstance(exc, PDFQualityError):
+                exc.document_id = document_id
             logger.exception(f"文档处理失败: {exc}")
             if vector_ids:
                 try:

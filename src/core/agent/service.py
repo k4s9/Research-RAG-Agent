@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 from fastapi import HTTPException
@@ -126,9 +127,40 @@ def response_from_state(run, execution):
 
 
 async def execute_run(db, orchestrator, run, resume_input=None):
+    run_id = run.id
+    try:
+        return await _execute_run(db, orchestrator, run, resume_input)
+    except Exception as exc:
+        # A failed flush leaves the session unusable until rollback. Keep the last
+        # committed checkpoint so an explicit resume can finalize without inference.
+        await db.rollback()
+        failed = await db.execute(
+            update(AgentRun)
+            .where(AgentRun.id == run_id, AgentRun.status.in_(["running", "pending"]))
+            .values(
+                status="failed", error=f"execution_failed:{type(exc).__name__}",
+                finished_at=utc_now(),
+            )
+        )
+        if failed.rowcount:
+            await db.execute(
+                update(ChatSession)
+                .where(ChatSession.active_run_id == run_id)
+                .values(active_run_id=None)
+            )
+        await db.commit()
+        # SQL exception text can contain credentials or complete report parameters.
+        logging.getLogger(__name__).error("Run %s failed (%s)", run_id, type(exc).__name__)
+        raise
+
+
+async def _execute_run(db, orchestrator, run, resume_input=None):
     metadata = dict(run.state or {})
     request = metadata["request"]
     execution = metadata.get("execution")
+    reused_checkpoint = bool(
+        execution and execution.get("status") in {"completed", "insufficient_evidence"}
+    )
 
     async def checkpoint(value):
         run.state = {**metadata, "execution": value}
@@ -162,7 +194,10 @@ async def execute_run(db, orchestrator, run, resume_input=None):
         execution = result["checkpoint"]
     status = result["run_status"]
     if execution and execution.get("usage"):
-        execution["usage"] = price_usage(execution["usage"])
+        # A checkpoint may already contain the priced usage snapshot. Avoid
+        # mutating it on a no-inference resume, which must be idempotent.
+        if not reused_checkpoint and "usage_status" not in execution["usage"]:
+            execution["usage"] = price_usage(execution["usage"])
     # No report, message, or completed state can be written after cancellation is acknowledged.
     await db.refresh(run)
     if run.status == "cancelled":

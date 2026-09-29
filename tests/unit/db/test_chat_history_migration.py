@@ -79,6 +79,8 @@ async def test_legacy_upgrade_restores_session_and_complete_pagination(
     migrate(path)  # Restarting deployment is safe.
     engine = create_engine(f"sqlite:///{path}")
     factory = sessionmaker(engine, expire_on_commit=False)
+    status_type = next(c["type"] for c in inspect(engine).get_columns("agent_run") if c["name"] == "status")
+    assert status_type.length >= len("insufficient_evidence")
 
     async def database() -> AsyncIterator[ReadSession]:
         with factory() as session:

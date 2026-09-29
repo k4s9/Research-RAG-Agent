@@ -25,7 +25,7 @@ from src.core.ingest.pipeline import DocumentIngestPipeline
 from src.core.retrieval.embedder import Qwen3Embedder
 from src.core.retrieval.hybrid_search import HybridSearch
 from src.core.retrieval.hydration import hydrate_search_results
-from src.db.models import AgentRun, Base, Conversation, Document
+from src.db.models import AgentRun, Base, Chunk, Conversation, Document
 from src.db.postgres import get_db
 from src.db.vector_store import InMemoryVectorStore
 from src.main import app
@@ -154,6 +154,80 @@ def offline_services(tmp_path: Path) -> Iterator[SimpleNamespace]:
     app.dependency_overrides.clear()
     settings.upload_dir = previous_upload_dir
     engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_upload_is_searchable_from_each_current_project(offline_services):
+    payload = b"# Rediscovery\n\nRare calibration evidence belongs to both projects."
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        projects = []
+        for name in ("Original project", "Reused document project", "Unrelated project"):
+            response = await client.post("/api/v1/projects", json={"name": name})
+            assert response.status_code == 201, response.text
+            projects.append(response.json()["id"])
+        uploads = []
+        for project_id in projects[:2]:
+            response = await client.post(
+                "/api/v1/documents/upload",
+                files={"file": ("evidence.md", payload, "text/markdown")},
+                data={"project_ids": json.dumps([project_id])},
+            )
+            assert response.status_code == 200, response.text
+            uploads.append(response.json())
+        assert uploads[0]["document_id"] == uploads[1]["document_id"]
+        for project_id in projects[:2]:
+            response = await client.post("/api/v1/search", json={
+                "query": "rare calibration", "project_ids": [project_id], "top_k": 3,
+            })
+            assert response.status_code == 200, response.text
+            assert response.json()["results"]
+            tool_result = await offline_services.orchestrator.tool_registry.search_knowledge(
+                {"query": "rare calibration"}, project_ids=[project_id], session_id="scope-test",
+            )
+            assert tool_result["results"]
+        # Removing the old association must also take effect without rewriting vectors.
+        with offline_services.sessions() as session:
+            document = session.get(Document, uploads[0]["document_id"])
+            document.projects = [project for project in document.projects if project.id == projects[1]]
+            session.commit()
+        for project_id in (projects[0], projects[2]):
+            response = await client.post("/api/v1/search", json={
+                "query": "rare calibration", "project_ids": [project_id],
+            })
+            assert response.status_code == 200, response.text
+            assert response.json()["results"] == []
+            tool_result = await offline_services.orchestrator.tool_registry.search_knowledge(
+                {"query": "rare calibration"}, project_ids=[project_id], session_id="scope-test",
+            )
+            assert tool_result["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_pdf_reports_blocked_page_and_indexes_nothing(offline_services) -> None:
+    with fitz.open() as image_source:
+        image_source.new_page().insert_text((72, 72), "Scanned evidence.")
+        png = image_source[0].get_pixmap().tobytes("png")
+    with fitz.open() as document:
+        document.new_page().insert_text((72, 72), "Native evidence.")
+        scanned = document.new_page()
+        scanned.insert_image(scanned.rect, stream=png)
+        payload = document.tobytes()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        project = await client.post("/api/v1/projects", json={"name": "PDF coverage"})
+        project_id = project.json()["id"]
+        response = await client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("mixed.pdf", payload, "application/pdf")},
+            data={"project_ids": json.dumps([project_id])},
+        )
+        assert response.status_code == 422, response.text
+        detail = response.json()["detail"]
+        assert "第 2 页" in detail["message"]
+        status = await client.get(f"/api/v1/documents/{detail['document_id']}/status")
+        assert status.json()["status"] == "failed"
+        assert status.json()["page_results"][1]["status"] == "needs_ocr"
+        with offline_services.sessions() as session:
+            assert not session.execute(select(Chunk)).scalars().all()
 
 
 @pytest.mark.asyncio

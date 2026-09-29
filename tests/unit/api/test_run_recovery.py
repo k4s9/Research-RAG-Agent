@@ -3,11 +3,12 @@ import json
 from copy import deepcopy
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 from test_chat_sessions import ChatHarness
 
 from src.core.agent.service import workers
-from src.db.models import Conversation, ReportArtifact
+from src.db.models import AgentRun, ChatSession, Conversation, ReportArtifact
 
 pytestmark = pytest.mark.unit
 
@@ -48,7 +49,10 @@ class Model:
 
     def generate_with_tools(self, prompt, **kwargs):
         self.calls += 1
-        return next(self.responses)
+        try:
+            return next(self.responses)
+        except StopIteration:
+            raise AssertionError("unexpected extra model request") from None
 
 
 class Registry:
@@ -268,5 +272,110 @@ async def test_final_checkpoint_recovery_never_repeats_model_or_report(tmp_path)
         assert finished["status"] == "completed"
         assert stack.llm.calls == 0
         assert finished["state"]["report_id"]
+    finally:
+        await stack.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining_calls", [0, 1])
+async def test_gap_comparison_and_revision_save_automatically_at_call_limit(tmp_path, remaining_calls):
+    report = report_payload()
+    report["incomparable"] = ["Different datasets."]
+    report["unresolved"] = ["Energy was not measured."]
+    model = Model(tool("search_knowledge", {"query": "memory"}), tool("submit_report", report))
+    stack = await ChatHarness(tmp_path / "gap-closure.db", llm=model, registry=Registry()).start()
+    try:
+        response = await stack.client.post("/api/v1/chat/runs", json=dict(
+            session_id="s", project_ids=["p"], message="Compare under 8 GB",
+            task_type="compare", strategy="b2", budget={"model_calls": 2 + remaining_calls},
+        ))
+        assert response.status_code == 202, response.text
+        parent_run = await terminal(stack.client, response.json()["run_id"])
+        assert parent_run["status"] == "insufficient_evidence"
+        parent_id = parent_run["state"]["report_id"]
+        parent = (await stack.client.get(f"/api/v1/chat/reports/{parent_id}")).json()
+        revised = deepcopy(report)
+        revised["change_summary"] = "The available memory is now 12 GB."
+        revised["recommendation"] = "At 12 GB, the measured A configuration fits [S1]."
+        stack.llm = Model(tool("submit_report", revised))
+        response = await stack.client.post("/api/v1/chat/runs", json=dict(
+            session_id="s", project_ids=["p"], message="Revise the limit to 12 GB",
+            task_type="revise", strategy="b2", parent_report_id=parent_id,
+            budget={"model_calls": 1 + remaining_calls},
+        ))
+        assert response.status_code == 202, response.text
+        child_run = await terminal(stack.client, response.json()["run_id"])
+        assert child_run["status"] == "insufficient_evidence"
+        child_id = child_run["state"]["report_id"]
+        child = (await stack.client.get(f"/api/v1/chat/reports/{child_id}")).json()
+        assert child["structured"] == revised
+        assert child["parent_report_id"] == parent_id
+        assert child["evidence"] == parent["evidence"]
+        await stack.restart()
+        for run, artifact in [(parent_run, parent), (child_run, child)]:
+            assert (await stack.client.get(f"/api/v1/chat/reports/{artifact['id']}")).json() == artifact
+            assert (await stack.client.get(f"/api/v1/chat/reports/{artifact['id']}/download")).text == artifact["markdown"]
+            reopened = (await stack.client.get(f"/api/v1/chat/runs/{run['run_id']}")).json()
+            assert reopened["state"]["execution"]["usage"] == run["state"]["execution"]["usage"]
+        assert model.calls == 2
+        assert stack.llm.calls == 1
+        with stack.sessions() as db:
+            assert len(db.scalars(select(ReportArtifact)).all()) == 2
+    finally:
+        await stack.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("background", [True, False])
+async def test_failed_report_transaction_is_visible_and_resumes_without_inference(tmp_path, background):
+    report = report_payload()
+    report["unresolved"] = ["Energy was not measured."]
+    model = Model(tool("search_knowledge", {"query": "memory"}), tool("submit_report", report))
+    stack = await ChatHarness(tmp_path / "save-failure.db", llm=model, registry=Registry()).start()
+
+    def break_insert(mapper, connection, target):
+        connection.exec_driver_sql("INSERT INTO missing_report_table VALUES (1)")
+
+    event.listen(ReportArtifact, "before_insert", break_insert)
+    try:
+        request = dict(session_id="s", project_ids=["p"], message="Compare",
+                       task_type="compare", strategy="b2", budget={"model_calls": 2})
+        if background:
+            response = await stack.client.post("/api/v1/chat/runs", json=request)
+            assert response.status_code == 202
+            run_id = response.json()["run_id"]
+        else:
+            with pytest.raises(OperationalError):
+                await stack.client.post("/api/v1/chat/message", json=request)
+            with stack.sessions() as db:
+                run_id = db.scalars(select(AgentRun)).one().id
+        failed = await terminal(stack.client, run_id)
+        assert failed["status"] == "failed"
+        assert failed["error"] == "execution_failed:OperationalError"
+        assert failed["finished_at"]
+        checkpoint = failed["state"]["execution"]
+        assert checkpoint["status"] == "insufficient_evidence"
+        assert checkpoint["report"] == report
+        assert not failed["state"].get("report_id")
+        with stack.sessions() as db:
+            assert db.get(ChatSession, "s").active_run_id is None
+            assert not db.scalars(select(ReportArtifact)).all()
+            assert len(db.scalars(select(Conversation)).all()) == 1
+    finally:
+        event.remove(ReportArtifact, "before_insert", break_insert)
+        await stack.stop()
+
+    await stack.start()
+    try:
+        resumed = await stack.client.post(f"/api/v1/chat/runs/{run_id}/resume", json={})
+        assert resumed.status_code == 202
+        finished = await terminal(stack.client, run_id)
+        assert finished["status"] == "insufficient_evidence"
+        assert finished["error"] is None
+        assert finished["state"]["execution"]["usage"] == checkpoint["usage"]
+        assert model.calls == 2
+        with stack.sessions() as db:
+            assert len(db.scalars(select(ReportArtifact)).all()) == 1
+            assert len(db.scalars(select(Conversation)).all()) == 2
     finally:
         await stack.stop()

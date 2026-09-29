@@ -52,4 +52,5 @@ dev = [
     "aiosqlite>=0.20.0",
 ]
 ocr = ["paddleocr>=2.7.0.3"]
+tokenization = ["tokenizers>=0.20.0"]
 legacy-models = ["flagembedding>=1.2.16"]

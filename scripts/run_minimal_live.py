@@ -94,19 +94,20 @@ def prepare(output):
 
 
 @contextmanager
-def record_http(output, stage):
+def record_http(output, stage, *, limits=None):
     """Observe the actual clients' real transports; never replace a service response."""
     import httpx
     import requests
     from src.core.agent.runtime import token_upper_bound
 
+    limits = limits or dict(generation=7, embedding=14, reranker=8, total_tokens=132096)
     original_async = httpx.AsyncClient.send
     original_sync = requests.Session.send
     ledger = dict(generation=0, embedding=0, reranker=0, accounted_tokens=0,
                   prompt_tokens=0, completion_tokens=0, unknown_usage_calls=0, cost=None)
 
     def begin(kind, payload):
-        limit = {"generation": 7, "embedding": 14, "reranker": 8}[kind]
+        limit = limits[kind]
         if ledger[kind] >= limit:
             raise RuntimeError(f"batch {kind} request budget exhausted")
         reserve = 0
@@ -119,7 +120,7 @@ def record_http(output, stage):
             reserve = context + payload["max_tokens"]
             if stage[0] == "probe" and (ledger[kind] or context > 2048):
                 raise RuntimeError("probe budget exhausted")
-            if ledger["accounted_tokens"] + reserve > 132096:
+            if ledger["accounted_tokens"] + reserve > limits["total_tokens"]:
                 raise RuntimeError("batch token budget exhausted")
             ledger["accounted_tokens"] += reserve
             ledger["unknown_usage_calls"] += 1
@@ -196,6 +197,7 @@ def record_http(output, stage):
     httpx.AsyncClient.send = async_send
     requests.Session.send = sync_send
     try:
+        write_json(output / "usage.json", ledger)
         yield ledger
     finally:
         httpx.AsyncClient.send = original_async

@@ -149,8 +149,8 @@ class AgentRun(Base):
     session_id = Column(String(36), ForeignKey("chat_session.id"), nullable=False, index=True)
     run_type = Column(String(20), nullable=False, default="chat")  # chat/qa/research/report/ingest
     goal = Column(Text, nullable=False, default="")
-    # pending/running/waiting_user/completed/failed/cancelled
-    status = Column(String(20), nullable=False, default="pending")
+    # Includes insufficient_evidence (21 characters) and budget_exceeded.
+    status = Column(String(32), nullable=False, default="pending")
     plan = Column(JSON, nullable=True)
     state = Column(JSON, nullable=True)
     step_count = Column(Integer, nullable=False, default=0)

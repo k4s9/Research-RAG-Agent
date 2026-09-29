@@ -310,8 +310,10 @@ class AgentOrchestrator:
                         c.verdict == "insufficient" for c in report.claims
                     )
                     followup_available = (
-                        usage["model_calls"] < limits.model_calls
-                        and usage["tool_calls"] < limits.tool_calls
+                        # A useful follow-up needs a read, then a model response
+                        # that can submit the report using that observation.
+                        limits.model_calls - usage["model_calls"] >= 2
+                        and limits.tool_calls - usage["tool_calls"] >= 2
                     )
                     if (
                         insufficient and strategy == "b2" and state["gap_checks"] == 0
@@ -324,7 +326,11 @@ class AgentOrchestrator:
                             "instruction": "One bounded follow-up is allowed. Then resubmit, preserving unresolved gaps honestly.",
                         }
                     else:
-                        report_data = report.model_dump()
+                        # Preserve the submitted payload in checkpoints. The
+                        # schema default is applied only when rendering or
+                        # persisting a validated artifact, so recovery can
+                        # reproduce the model's original report exactly.
+                        report_data = args.copy()
                         answer = render_report(report, evidence.sources)
                         result = {"accepted": True}
                         terminal = "insufficient_evidence" if insufficient else "completed"

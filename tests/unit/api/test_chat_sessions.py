@@ -34,6 +34,9 @@ class SessionAdapter:
     async def commit(self) -> None:
         self.session.commit()
 
+    async def rollback(self) -> None:
+        self.session.rollback()
+
     async def refresh(self, instance: object) -> None:
         self.session.refresh(instance)
 
